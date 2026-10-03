@@ -1,0 +1,731 @@
+# emrs — Specification
+
+Status: draft for review, 2026-10-03.
+Source: `docs/brainstorming.md`, critically reviewed; every decision below was either
+confirmed by the project owner or is marked as a point to verify (section 13).
+
+## 1. Purpose
+
+`emrs` lets authors write Emacs dynamic modules in Rust as **message-passing
+services**. Rust owns threads and state, Emacs owns its event loop and UI, and
+typed messages are the only boundary between them. The raw Emacs module API is
+never visible to the module author.
+
+The project consists of a Rust crate (`emrs`) and a companion Elisp library
+(`emrs.el`).
+
+### 1.1 Goals
+
+- A module author implements a `Service` trait and one macro line; no `unsafe`,
+  no `emacs_env`, no `emacs_value`.
+- Service code never runs on the Emacs thread, so it cannot block the UI.
+- Messages are ordinary `serde` types, converted directly to and from Lisp
+  values with no text or intermediate representation.
+- Elisp can send fire-and-forget requests, make calls with one reply, wait for a
+  reply synchronously, and consume streams with backpressure and cancellation.
+- Several modules built with different `emrs` versions coexist in one Emacs.
+
+### 1.2 Non-goals for this version
+
+These are deferred; section 14 lists the constraints the core keeps for them.
+
+- Opaque resource handles (`user-ptr`) and synchronous exported functions.
+- Build and distribution tooling (`cargo emacs`, CI action, prebuilt binaries,
+  installer).
+- Pull-style stream consumption, and drop/coalesce overflow policies.
+- Automatic restart of failed services.
+- A general-purpose binding to the Emacs module API.
+
+### 1.3 Fixed decisions
+
+| Topic | Decision |
+|---|---|
+| Name | Crate `emrs`, Elisp library `emrs.el`, Elisp prefix `emrs-` |
+| Minimum Emacs | 30.1 (declared by `emrs.el`) |
+| FFI | Own hand-written bindings, private to the crate |
+| Wake-up | `open_channel` on a pipe process |
+| Model | Actor services; handlers run off the Emacs thread |
+| Execution | Uncapped elastic thread pool per module |
+| Wire format | Keyword-headed lists and plists |
+| Licence | Rust: `MIT OR Apache-2.0`. Elisp: `GPL-3.0-or-later` |
+| Platforms | Linux and macOS (x86_64, aarch64) guaranteed; Windows best-effort |
+
+## 2. Terminology
+
+- **Module**: one shared library loaded by Emacs, built from a crate that uses
+  `emrs`. It has a name such as `git-rs`.
+- **Runtime**: the per-module machinery (pool, queues, instance table). Each
+  module statically links its own copy of `emrs` and therefore its own runtime.
+- **Service**: a Rust type implementing `Service`. A module registers one or
+  more services.
+- **Instance**: one running copy of a service, started from Elisp, with private
+  state. A service may have any number of instances.
+- **Request**: a message from Emacs to an instance.
+- **Event**: an unsolicited message from an instance to Emacs.
+- **Call**: a request that expects exactly one reply or error.
+- **Stream**: a call answered by a sequence of items and one terminal state.
+- **Delivery**: one record handed from the runtime to `emrs.el` during a drain.
+
+## 3. Architecture
+
+```text
+ Emacs thread                                  Runtime threads (per module)
+ ────────────                                  ────────────────────────────
+ emrs.el
+   emrs-send / emrs-call ──► module fn ──decode──► mailbox ──► handler (pool)
+                                                                  │
+   dispatch to callbacks ◄── module fn `drain` ◄── outbound FIFO ◄┘
+            ▲                                          │
+            └──── pipe process filter ◄── 1 byte ──────┘ (open_channel fd)
+```
+
+Invariants:
+
+1. Lisp values are created and read only on the Emacs thread, inside a module
+   function call, and never outlive that call. The runtime holds no global
+   references, user-ptrs or finalizers in this version.
+2. `Service` methods and spawned tasks run only on runtime threads.
+3. A module function called from Emacs never blocks on service code. The only
+   exception is the explicit, time-bounded `shutdown`.
+4. Emacs → Rust queues are unbounded (Emacs must not block). Rust → Emacs
+   stream traffic is bounded per stream (producers block).
+
+### 3.1 Repository layout
+
+```text
+Cargo.toml                 workspace
+emrs/
+  build.rs                 records the target triple
+  src/lib.rs               public API, re-exports
+  src/ffi/                 private: sys.rs (struct layouts), env.rs, value.rs
+  src/serde/               ser.rs, de.rs, names.rs
+  src/runtime/             pool.rs, instance.rs, outbound.rs, cancel.rs,
+                           reply.rs, stream.rs
+  src/module.rs            protocol functions, `module!` macro
+  src/error.rs
+  src/testing.rs           host for testing services without Emacs
+elisp/emrs.el
+tests/emrs-test-module/    cdylib used by the ERT suite
+tests/elisp/               ERT tests
+examples/echo/  examples/grep/
+```
+
+Rust edition 2024, minimum supported Rust 1.85. Dependencies of `emrs`: `serde`
+and `libc` only. There is no proc-macro crate; message types use `serde`'s
+derives.
+
+## 4. Rust API
+
+### 4.1 Module entry point
+
+```rust
+emrs::module!("git-rs", [Git, Blame]);
+```
+
+The macro expands to:
+
+- the exported symbol `plugin_is_GPL_compatible`;
+- `emacs_module_init`, which checks `runtime->size` and that `env->size` covers
+  the Emacs 28 environment layout (the layouts of 29 and 30 add nothing),
+  creates the runtime, defines the protocol functions of section 6, and
+  provides the feature `git-rs-module`;
+- a registry mapping each service's `NAME` to its start function.
+
+The module name must be a valid Elisp symbol name. Duplicate service names are a
+compile-time error where possible and otherwise an init failure.
+
+Modules must be built with `panic = "unwind"`; with `panic = "abort"` any panic
+terminates Emacs. `module!` therefore emits a `compile_error!` under
+`#[cfg(panic = "abort")]`.
+
+### 4.2 Service
+
+```rust
+pub trait Service: Sized + Send + 'static {
+    const NAME: &'static str;
+    type Args: DeserializeOwned + Send + 'static;
+    type Request: DeserializeOwned + Send + 'static;
+    type Event: Serialize + Send + 'static;
+
+    fn start(args: Self::Args, ctx: &Context<Self>) -> Result<Self, Error>;
+    fn handle(&mut self, req: Self::Request, reply: Reply, ctx: &Context<Self>);
+    fn stop(&mut self) {}
+}
+```
+
+- `start` builds the instance state. It may be slow (open a repository, connect).
+- `handle` processes one request. For one instance, `start`, `handle` and `stop`
+  never run concurrently and requests are handled in arrival order.
+- `stop` is called once after the last `handle`, only if `start` succeeded and
+  no panic occurred. Afterwards the state is dropped on a runtime thread.
+- Handlers may block. Long work that should not delay later requests is moved to
+  `ctx.spawn`.
+
+### 4.3 Context
+
+`Context<S>` is `Clone + Send + Sync + 'static`.
+
+| Method | Behaviour |
+|---|---|
+| `emit(event: S::Event)` | Queue an event for the instance's `on-event` handler. Never blocks; the queue is unbounded. |
+| `spawn(f: impl FnOnce(CancelToken) + Send + 'static)` | Run `f` on the pool. The token is a child of the instance token. |
+| `address() -> Address<S>` | A `Clone + Send` handle whose `send(req: S::Request)` enqueues a request into the instance's own mailbox. |
+| `cancel_token() -> CancelToken` | The instance token; cancelled when the instance stops or fails. |
+| `stop()` | Request the same shutdown as `emrs-stop`. |
+| `log(level, msg)` | Send a line to the `*emrs-log*` buffer. |
+
+Self-messages reuse `Request`: a worker reports back with
+`ctx.address().send(Request::Indexed(..))`. Variants that Elisp must not send are
+marked `#[serde(skip_deserializing)]`. A self-sent request carries a `Reply`
+whose `is_wanted()` is false.
+
+After the instance has stopped or failed, `emit` and `Address::send` are no-ops.
+
+### 4.4 Reply
+
+`Reply` is `Send + 'static` and is consumed by answering. It may be moved into a
+spawned task.
+
+| Method | Behaviour |
+|---|---|
+| `ok(value: impl Serialize + Send + 'static)` | Answer the call with a value. |
+| `err(e: impl Into<Error>)` | Answer the call with an error of kind `service`. |
+| `stream<T>(capacity: usize) -> StreamSender<T>` | Answer with a stream of `T: Serialize + Send + 'static`. |
+| `token() -> CancelToken` | Cancelled when Elisp cancels this call or the instance stops. |
+| `is_wanted() -> bool` | False if the request came from `emrs-send` or an `Address`. |
+
+Replies are not tied to one type per service: each request variant may answer
+with its own type. The pairing of request and reply type is a documented
+convention of the service, not checked by the compiler.
+
+Mode mismatches (the mode is chosen by the Elisp caller, section 5):
+
+| Caller used | Handler did | Result |
+|---|---|---|
+| `emrs-call` | `stream()` | Caller gets error `protocol`; the sender is already cancelled. |
+| `emrs-call-stream` | `ok(v)` | One batch `(v)`, then end `done`. |
+| `emrs-call-stream` | `err(e)` | End `failed` with `e`, no items. |
+| `emrs-send` / `Address` | `ok(v)` | Discarded. |
+| `emrs-send` / `Address` | `err(e)` | Logged to `*emrs-log*`. |
+| `emrs-send` / `Address` | `stream()` | The sender is already cancelled. |
+
+A `Reply` dropped without an answer produces error `no-reply` for the caller.
+This also covers panics, because unwinding drops the reply.
+
+### 4.5 StreamSender
+
+`StreamSender<T>` is `Send + 'static` (not `Clone`).
+
+| Method | Behaviour |
+|---|---|
+| `send(item: T) -> Result<(), StreamClosed>` | Queue an item. Blocks while `capacity` items of this stream are queued and not yet drained. Returns `Err` once the call is cancelled or the instance stopped; a blocked `send` is woken in that case. |
+| `try_send(item: T) -> Result<(), TrySendError<T>>` | As `send` but returns `Full(item)` instead of blocking. For use from async code. |
+| `finish(self)` | Terminal state `done`. |
+| `fail(self, e: impl Into<Error>)` | Terminal state `failed`. |
+| `token() -> CancelToken` | Same token as the originating `Reply`. |
+
+Dropping a sender without `finish` or `fail` yields `failed` with kind
+`no-reply`. `capacity` must be at least 1.
+
+### 4.6 CancelToken
+
+`Clone + Send + Sync`. Methods: `is_cancelled()`, and
+`wait_timeout(d: Duration) -> bool` (sleeps up to `d`, returns true as soon as
+the token is cancelled). Cancellation is cooperative. Tokens form a tree:
+instance token → call tokens and spawn tokens.
+
+### 4.7 Error
+
+```rust
+pub struct Error { /* message, optional data */ }
+impl Error {
+    pub fn new(message: impl Into<String>) -> Self;
+    pub fn with_data(message: impl Into<String>,
+                     data: impl Serialize + Send + 'static) -> Self;
+}
+impl<E: std::error::Error> From<E> for Error { .. }
+```
+
+`emrs::Error` deliberately does not implement `std::error::Error`, so the
+blanket `From` is possible and `?` works in `start`.
+
+### 4.8 Execution
+
+- One elastic pool per module. A job is either "run instance X until its mailbox
+  is empty" or a spawned task.
+- When a job is submitted and no worker is idle, a new thread starts
+  immediately. There is no upper limit. A worker idle for 10 seconds exits.
+- Each instance has a `scheduled` flag so that at most one worker runs it. The
+  flag is cleared only after re-checking that the mailbox is empty.
+- An idle instance uses no thread.
+- Threads are named `emrs-<module>-<n>`.
+- The pool does not limit CPU oversubscription; this is an accepted trade-off
+  against the risk of starvation.
+
+### 4.9 Panics
+
+- In `start`: the instance becomes `failed`.
+- In `handle` or `stop`: the instance becomes `failed`; the state is dropped
+  (drop panics are caught and logged); `stop` is not called.
+- In a spawned task: caught and logged; the instance keeps running. Replies and
+  stream senders owned by the task are dropped and report `no-reply`.
+- In a protocol function on the Emacs thread: caught and signalled to Lisp as
+  `emrs-error` with kind `protocol`.
+
+### 4.10 Testing host
+
+`emrs::testing::Host<S>` runs a service without Emacs: `Host::start(args)`,
+`send(req)`, `call(req) -> Result<Box<dyn Any>, Error>` with typed downcast
+helpers, `call_stream(req)`, `events()`, `stop()`. It uses the real pool,
+mailbox, reply and stream code, replacing only the Lisp conversion and the pipe.
+
+## 5. Elisp API (`emrs.el`)
+
+`emrs.el` declares `Package-Requires: ((emacs "30.1"))`.
+
+### 5.1 Functions
+
+```elisp
+(emrs-load-module MODULE &optional FILE)
+(emrs-start MODULE SERVICE ARGS &key on-event on-exit)   ; → instance
+(emrs-send INSTANCE REQUEST)
+(emrs-call INSTANCE REQUEST CALLBACK)                    ; → call
+(emrs-call-sync INSTANCE REQUEST &optional TIMEOUT)      ; → reply
+(emrs-call-stream INSTANCE REQUEST &key on-batch on-end) ; → call
+(emrs-cancel CALL)
+(emrs-stop INSTANCE)
+(emrs-instance-state INSTANCE)   ; starting | running | stopping | stopped | failed
+(emrs-module-info MODULE)        ; the info plist of section 6
+```
+
+- `MODULE` is a symbol such as `git-rs`. `SERVICE` is the string `Service::NAME`.
+- `emrs-load-module` loads the module if needed: with `FILE` through
+  `module-load`, otherwise through `(require 'git-rs-module)`, so the file
+  `git-rs-module` + `module-file-suffix` must be on `load-path`. It then
+  performs the handshake of section 6.2. `emrs-start` calls it implicitly.
+- `emrs-start` returns immediately with the instance in state `starting`.
+  Requests sent in that state are queued.
+- `on-event` is called as `(F INSTANCE EVENT)`.
+- `on-exit` is called exactly once as `(F INSTANCE STATUS ERR)` with `STATUS`
+  `stopped` or `failed`.
+- `CALLBACK` is called exactly once as `(F REPLY ERR)`; exactly one argument is
+  non-nil, except that a successful reply may itself be nil.
+- `on-batch` is called as `(F ITEMS)` with a non-empty list, in order.
+- `on-end` is called exactly once as `(F STATUS ERR)` with `STATUS` `done`,
+  `failed` or `cancelled`. No `on-batch` call follows it.
+- `emrs-cancel` on a finished call does nothing. On an active call it completes
+  the call at once on the Elisp side (callback with error `cancelled`, or
+  `on-end` with `cancelled`), discards later deliveries for it, and cancels the
+  Rust token.
+- Sending to an instance in state `stopping`, `stopped` or `failed` signals
+  `emrs-error` with kind `stopped`.
+
+### 5.2 Synchronous calls
+
+`emrs-call-sync` returns the reply or signals `emrs-error`.
+
+- `TIMEOUT` is in seconds; nil means wait until the reply arrives or the user
+  quits. On timeout the call is cancelled and kind `timeout` is signalled.
+- `C-g` cancels the call and the quit propagates normally.
+- The wait loop drains the module directly and then sleeps in
+  `accept-process-output` on the module's pipe process, so it wakes when data
+  arrives (see 13.3).
+- While waiting, other deliveries of the same module are dispatched: event
+  handlers and other callbacks may run. This reentrancy is documented.
+
+### 5.3 Errors
+
+An error value is a plist `(:kind KIND :message STRING :data DATA)`.
+
+| Kind | Meaning |
+|---|---|
+| `service` | The handler answered with `err` / `fail`. `:data` is the optional payload. |
+| `no-reply` | The reply or stream sender was dropped unanswered. |
+| `cancelled` | The call was cancelled from Elisp. |
+| `timeout` | `emrs-call-sync` timed out. |
+| `stopped` | The instance stopped before answering, or was not running. |
+| `failed` | The instance failed (panic or `start` error) before answering. |
+| `decode` | A request or `ARGS` could not be converted to the Rust type. |
+| `encode` | A reply, item or event could not be converted to Lisp. |
+| `protocol` | Version mismatch, mode mismatch, unknown service, or internal fault. |
+
+The condition `emrs-error` has error data `(KIND MESSAGE DATA)`.
+
+Decoding happens on the Emacs thread inside `emrs-send`, `emrs-call`,
+`emrs-call-sync` and `emrs-call-stream`, so a malformed request signals
+`emrs-error` with kind `decode` synchronously and nothing is queued. `ARGS` are
+decoded the same way inside `emrs-start`.
+
+### 5.4 Callback protection
+
+Every user callback is run under error protection. A signalled error is written
+to `*emrs-log*` and shown with `display-warning`; it never prevents the
+remaining deliveries of the same drain from being dispatched.
+
+### 5.5 Options and bookkeeping
+
+- `emrs-drain-max` (default 512): maximum deliveries converted per drain.
+- `emrs-shutdown-timeout` (default 0.5 s): wait at Emacs exit.
+- Running instances are held in a table in `emrs.el` and are therefore not
+  garbage-collected; they end only through `emrs-stop`, failure or Emacs exit.
+- `kill-emacs-hook` calls every loaded module's `shutdown`.
+- `*emrs-log*` receives runtime log lines with module, instance and level.
+
+## 6. Module protocol
+
+The protocol is the private interface between `emrs.el` and a module. Module
+authors and package users never call it.
+
+### 6.1 Functions
+
+For a module named `M`, `emacs_module_init` defines:
+
+| Function | Purpose |
+|---|---|
+| `(M--emrs-info)` | Returns `(:protocol N :emrs "x.y.z" :module "M" :version "a.b.c" :services ("s1" …) :target "triple")`. |
+| `(M--emrs-attach PIPE)` | Calls `open_channel` on `PIPE` and stores the descriptor; closes a previously stored one. |
+| `(M--emrs-start SERVICE ARGS)` | Decodes `ARGS`, creates an instance, returns its integer id. |
+| `(M--emrs-send ID REQUEST CALL-ID MODE)` | Decodes and enqueues. `MODE` is nil, `call` or `stream`. |
+| `(M--emrs-cancel ID CALL-ID)` | Cancels the call's token and discards its queued deliveries. |
+| `(M--emrs-stop ID)` | Starts the stop sequence of section 7. |
+| `(M--emrs-drain MAX)` | Returns a list of at most `MAX` deliveries. |
+| `(M--emrs-shutdown TIMEOUT)` | Cancels all instances and blocks up to `TIMEOUT` seconds. |
+
+Instance ids are allocated by the module (positive integers, never reused within
+a session). Call ids are allocated by `emrs.el` per instance.
+
+A delivery is a vector `[KIND INSTANCE-ID CALL-ID PAYLOAD]`:
+
+| `KIND` | `CALL-ID` | `PAYLOAD` |
+|---|---|---|
+| `event` | nil | the event |
+| `reply` | id | the value |
+| `error` | id | error plist |
+| `items` | id | non-empty list of items |
+| `end` | id | `(STATUS . ERR)` |
+| `state` | nil | `(STATE . ERR)` |
+| `log` | nil | `(LEVEL . MESSAGE)` |
+
+### 6.2 Versioning
+
+`:protocol` is a single integer, 1 for this specification. It changes only when
+the functions or delivery shapes above change incompatibly.
+
+`emrs.el` supports every protocol version from 1 to its own maximum. On load:
+
+- a module with a newer protocol is rejected with a message telling the user to
+  upgrade the `emrs` Elisp package;
+- a module with an older, supported protocol is driven through that version's
+  code path.
+
+This is what allows two modules built against different `emrs` crate versions
+to run in one Emacs. Modules never exchange Rust objects with each other; any
+communication between modules goes through Lisp values.
+
+Emacs cannot unload a module. A new build of an already loaded module takes
+effect only after restarting Emacs; `emrs-load-module` reports this when the
+file on disk is newer than the loaded one.
+
+### 6.3 Wake-up and drain
+
+- `emrs.el` creates one pipe process per module with `make-pipe-process`
+  (`:noquery t`, no buffer, binary coding, filter `emrs--filter`) and passes it
+  to `attach`.
+- The runtime has one outbound FIFO per module and an atomic `wake-pending`
+  flag. A producer that pushes sets the flag and, only on the transition from
+  clear to set, writes one byte to the descriptor. The pipe therefore never
+  fills.
+- The filter discards its input and calls `drain`. `drain` clears the flag
+  first, converts up to `MAX` deliveries, and, if the FIFO is still non-empty,
+  sets the flag and writes a byte again. Emacs thus returns to its command loop
+  between drains.
+- Consecutive queued items of one stream are merged into a single `items`
+  delivery. This is the only batching mechanism; authors configure capacity
+  only.
+- A stream's in-flight count rises on `send` and falls when the item is
+  converted in `drain`. This implements backpressure.
+- Order is preserved across everything a module delivers, because there is a
+  single FIFO.
+- A value whose conversion fails becomes an `error` delivery with kind `encode`
+  (calls and streams; a stream then ends `failed`) or a `log` delivery (events).
+- If the pipe process dies, its sentinel creates a new one and calls `attach`
+  again, then drains once.
+- The runtime closes the descriptor in `shutdown`.
+
+### 6.4 FFI rules
+
+- All bindings are private. The environment pointer is used only during the
+  module function call it was passed to and only on the calling thread; the
+  wrapper types are not `Send`.
+- After every environment call that can exit non-locally, the wrapper checks
+  `non_local_exit_check` and returns a Rust error. The protocol function then
+  returns to Emacs with the pending signal intact.
+- Every protocol function body runs inside `catch_unwind`.
+- Module functions may be called from any Lisp thread; runtime state is guarded
+  accordingly.
+
+## 7. Instance lifecycle
+
+```text
+starting ──start ok──► running ──emrs-stop / ctx.stop()──► stopping ──► stopped
+    │                     │                                    │
+    └─ start Err / panic ─┴──────── panic in handle ───────────┴──► failed
+```
+
+- **starting**: `start` is running or queued. Incoming requests wait in the
+  mailbox.
+- **running**: requests are handled in order.
+- **stopping**: the instance token is cancelled. Requests still in the mailbox
+  are not handled; their calls end with `stopped`. The handler in progress, if
+  any, finishes. `stop()` runs, then the state is dropped.
+- **stopped / failed**: terminal. All calls still open end with `stopped` or
+  `failed` (streams: `on-end` with `failed` and that error kind). `on-exit`
+  runs once, after those call completions.
+- `emrs-stop` never blocks; it returns while the instance is `stopping`.
+  Calling it on a terminal instance does nothing.
+- Spawned tasks are not joined. They observe their cancelled token; their later
+  `emit`, `ok` and `send` calls are no-ops or return `StreamClosed`.
+- There is no automatic restart. A package restarts a service from `on-exit` if
+  it wants to.
+- At Emacs exit, `shutdown` cancels every instance and waits up to
+  `emrs-shutdown-timeout` for `stop()` hooks to complete; remaining threads end
+  with the process.
+
+## 8. Lisp data mapping
+
+Conversion is implemented as a `serde::Serializer` and `serde::Deserializer`
+that work directly on Lisp values.
+
+### 8.1 Names
+
+Struct field names and enum variant names become keywords in kebab-case:
+
+- `_` becomes `-`;
+- a `-` is inserted before an upper-case letter that follows a lower-case letter
+  or digit, and before the last letter of an upper-case run that is followed by
+  a lower-case letter (`HTTPServer` → `http-server`);
+- the result is lower-cased.
+
+Names changed with `#[serde(rename…)]` go through the same conversion. When
+decoding, the expected field or variant names are converted and compared with
+the keyword; two names of one type that convert to the same keyword are an
+error.
+
+### 8.2 Rust → Lisp
+
+| Rust (serde data model) | Lisp |
+|---|---|
+| `bool` | `t` / `nil` |
+| integers up to 128 bit | integer (fixnum or bignum) |
+| `f32`, `f64` | float |
+| `char` | character (integer) |
+| `str`, `String` | multibyte string |
+| bytes (`serde_bytes`) | unibyte string |
+| `None`, `()`, unit struct | `nil` |
+| `Some(x)`, newtype struct | as `x` |
+| sequence, tuple, tuple struct | list |
+| map | alist `((K . V) …)` |
+| struct | plist `(:field-a A :field-b B)` |
+| unit variant | `(:variant)` |
+| newtype variant | `(:variant X)` |
+| tuple variant | `(:variant A B)` |
+| struct variant | `(:variant :field-a A :field-b B)` |
+
+Notes:
+
+- `Vec<u8>` without `serde_bytes` is a list of integers (a `serde` property).
+- A `None` field is emitted as `:field nil` unless `skip_serializing_if` omits it.
+- `nil` is ambiguous on the Lisp side: `None`, `false`, `()` and an empty
+  sequence are indistinguishable. Types whose meaning depends on that
+  difference (`Option<bool>`, `Option<Vec<T>>`, `Option<Option<T>>`) lose it.
+
+### 8.3 Lisp → Rust
+
+Decoding is directed by the Rust type.
+
+| Rust type | Accepted Lisp |
+|---|---|
+| `bool` | `nil` → false, anything else → true |
+| integer | integer in range; otherwise error |
+| float | float or integer |
+| `char` | character, or string of length 1 |
+| `String` | string |
+| bytes | unibyte string (see 13.2), or multibyte string as UTF-8 |
+| `Option<T>` | `nil` → `None`, otherwise `Some` |
+| unit | `nil` |
+| sequence, tuple | proper list or vector; tuples check the length |
+| map | alist or hash table |
+| struct | plist with keyword keys; unknown and missing keys follow the type's `serde` attributes |
+| enum | list headed by the variant keyword; a bare keyword for a unit variant |
+
+- Type mismatches, improper lists and out-of-range numbers are `decode` errors
+  whose message names the path to the offending value.
+- Nesting deeper than 128 levels is a `decode` error. Circular lists are not
+  detected and must not be sent.
+- Self-describing decoding (`deserialize_any`: `serde_json::Value`, untagged,
+  internally or adjacently tagged enums) is best-effort: `nil` → unit, `t` →
+  true, numbers, strings, symbol → string, vector → sequence, hash table → map,
+  list whose first element is a keyword → map with keyword names as keys, other
+  list → sequence. It is documented as lossy.
+- `#[serde(flatten)]` is not supported in this version (serde turns such
+  structs into maps, which would change their Lisp shape).
+
+## 9. Error handling summary
+
+| Situation | Outcome |
+|---|---|
+| Malformed request or args | `emrs-error` `decode`, synchronously, nothing queued |
+| Handler returns an error | Caller gets `service` |
+| Handler forgets to answer | Caller gets `no-reply` |
+| Handler panics | Instance `failed`; open calls get `failed`; `on-exit` |
+| Spawned task panics | Logged; its replies report `no-reply`; instance continues |
+| Value cannot be converted to Lisp | `encode` for the call, or a log line for an event |
+| Elisp callback signals | Logged and shown as a warning; other deliveries proceed |
+| Module protocol too new | `emrs-load-module` signals `protocol` with an upgrade hint |
+| Emacs older than the Emacs 28 layout | `emacs_module_init` returns non-zero; Emacs reports a load failure |
+
+## 10. Examples
+
+### 10.1 Echo
+
+```rust
+#[derive(Deserialize)]
+enum Request { Echo(String) }
+
+struct Echo;
+
+impl Service for Echo {
+    const NAME: &'static str = "echo";
+    type Args = ();
+    type Request = Request;
+    type Event = ();
+
+    fn start(_: (), _: &Context<Self>) -> Result<Self, Error> { Ok(Echo) }
+
+    fn handle(&mut self, req: Request, reply: Reply, _: &Context<Self>) {
+        match req { Request::Echo(s) => reply.ok(s) }
+    }
+}
+
+emrs::module!("echo-rs", [Echo]);
+```
+
+```elisp
+(setq e (emrs-start 'echo-rs "echo" nil))
+(emrs-call-sync e '(:echo "hi") 1.0)   ; ⇒ "hi"
+```
+
+### 10.2 Streaming search
+
+```rust
+#[derive(Deserialize)]
+enum Request { Grep { pattern: String, root: PathBuf } }
+
+#[derive(Serialize)]
+struct Match { path: PathBuf, line_number: u64, preview: String }
+
+fn handle(&mut self, req: Request, reply: Reply, ctx: &Context<Self>) {
+    match req {
+        Request::Grep { pattern, root } => {
+            let out = reply.stream::<Match>(1024);
+            ctx.spawn(move |_| {
+                for m in search(&pattern, &root) {
+                    if out.send(m).is_err() { return; }   // cancelled
+                }
+                out.finish();
+            });
+        }
+    }
+}
+```
+
+```elisp
+(setq call
+      (emrs-call-stream inst '(:grep :pattern "TODO" :root "/src")
+        :on-batch (lambda (items) (my-insert-matches items))
+        :on-end   (lambda (status err) (message "grep: %s" status))))
+(emrs-cancel call)   ; e.g. when the user changes the query
+```
+
+Each item arrives as `(:path "/src/a.rs" :line-number 42 :preview "…")`.
+
+## 11. Testing
+
+- **Runtime, without Emacs**: `cargo test` covers the pool (growth, idle exit,
+  one worker per instance), ordering, cancellation, stream backpressure and
+  terminal states, panic handling, and lifecycle transitions, using
+  `emrs::testing::Host`.
+- **Name conversion**: plain unit tests.
+- **Serde layer and full path, in Emacs**: ERT suites run with
+  `emacs --batch --module-assertions` against `tests/emrs-test-module`, which
+  provides round-trip services for every row of the mapping tables, plus
+  services that panic, never reply, flood events and stream beyond capacity.
+- **Elisp behaviour**: exactly-once callbacks, cancel races, `emrs-call-sync`
+  with timeout and simulated quit, callback errors, pipe process loss,
+  protocol-version rejection.
+- **CI matrix**: Emacs 30.x and 31.x on Linux x86_64, Linux aarch64 and macOS
+  aarch64 are required. macOS x86_64 is built, and tested where a runner is
+  available. Windows x86_64 runs and may fail.
+
+## 12. Acceptance criteria
+
+1. The two examples of section 10 build, load and behave as shown.
+2. A handler that sleeps for 5 seconds does not delay Emacs input handling or
+   other instances.
+3. A stream of one million items with capacity 1024 completes with bounded
+   memory, and Emacs stays responsive to input during it.
+4. Cancelling a stream stops deliveries immediately and the producer observes
+   the cancellation within one `send`.
+5. A panic in a handler leaves Emacs running, fails only that instance and
+   completes all its open calls.
+6. Two modules built against different `emrs` versions with the same protocol
+   run side by side.
+7. The whole ERT suite passes under `--module-assertions`.
+
+## 13. Points to verify during implementation
+
+These are assumptions the design depends on that have not been tested. Each has
+a fallback.
+
+1. **Windows descriptor**: that the descriptor returned by `open_channel` on
+   Windows can be written from Rust through the C runtime. Fallback: Windows
+   stays unsupported until solved.
+2. **Raw bytes from unibyte strings**: whether `copy_string_contents` can
+   return non-ASCII raw bytes. Fallback: convert through a Lisp call that maps
+   bytes to characters 0–255 and decode those in Rust.
+3. **Waking `accept-process-output`**: that it returns when the pipe receives
+   data even if called from within that process's filter (nested
+   `emrs-call-sync`). Fallback: wait in slices of 10 ms and drain directly.
+
+## 14. Future work and constraints kept for it
+
+| Later feature | What this version already guarantees |
+|---|---|
+| Resource handles (`user-ptr`) and synchronous functions | The FFI layer is private, so adding user-ptr, finalizers and exported functions breaks no public API. |
+| Prebuilt artifacts, download with compile fallback | Modules provide the feature `<name>-module`; `info` reports module version, `emrs` version, protocol and target triple for diagnostics. |
+| `cargo emacs` build tooling | The only build requirements are `cdylib`, `panic = "unwind"`, and the output file name `<name>-module` + suffix. |
+| Pull-style streams, overflow policies | `StreamSender` and the delivery kinds can be extended; changes to delivery shapes bump the protocol version. |
+| Async adapters | `try_send`, `CancelToken` and all handles are usable from async code today. |
+
+## 15. How this resolves the transcript's open issues
+
+| Issue in `brainstorming.md` | Resolution |
+|---|---|
+| `Module` vs `Service`/`Runtime` vs `Command`/`Stream`/`Resource` | One model: actor `Service` instances; streams are a reply form; resources deferred. |
+| Process-wide executor vs static linking | One elastic pool per module; modules are independent. |
+| `Command` used with two meanings | The term is dropped: `send`, `call`, `call-stream`. |
+| Drifting trait signatures | Fixed in 4.2. |
+| `(:search "x")` vs `(search "x")` | Keyword-headed lists; full rules in section 8. |
+| `send().await` vs no forced async runtime | Blocking `send` plus `try_send`; no async runtime dependency. |
+| Mixed Elisp names | Single `emrs-` prefix. |
+| Unspecified wake-up | `open_channel`, section 6.3. |
+| Thread running `handle` | Runtime pool, never the Emacs thread. |
+| No synchronous wait | `emrs-call-sync`. |
+| Deserialization not covered | Section 8.3. |
+| Panics, non-local exits, value lifetimes | Sections 4.9 and 6.4. |
+| Module "unloading" | Not possible; stated in 6.2 and section 7. |
+| Ambiguous pull model | Removed from this version. |
+| `plugin_is_GPL_compatible`, licensing | Exported by `module!`; licences in 1.3. |
+| Name collides with existing project | Renamed to `emrs`. |
+| "Emacs API 25" version number | Replaced by the size check and the protocol integer. |
+| Version mix of the Rust bindings | Protocol versioning, section 6.2. |
