@@ -112,6 +112,11 @@ WHAT names the callback for the message."
 (defun emrs--attach (m)
   "Create the wake-up pipe of module M and hand it to the module."
   (let* ((name (emrs--module-name m))
+         ;; Each wake-up is a single byte.  With adaptive read buffering
+         ;; (the default before Emacs 31) Emacs delays reading after such
+         ;; short reads by up to 50 ms, which would throttle every stream.
+         ;; The setting is captured when the process is created.
+         (process-adaptive-read-buffering nil)
          (pipe (make-pipe-process
                 :name (format " emrs-%s" name)
                 :buffer nil

@@ -302,6 +302,20 @@ SPEC is (VAR SERVICE ARGS &rest KEYS) as for `emrs-start'."
       (should (cl-every #'consp batches))
       (should (equal (apply #'append (reverse batches)) (number-sequence 0 4999))))))
 
+(ert-deftest emrs-test-wake-up-is-not-delayed-by-read-buffering ()
+  ;; 800 items at capacity 8 need at least 100 wake-ups.  Emacs 30 delays
+  ;; reading after short reads (`process-adaptive-read-buffering'), which
+  ;; would cost 10 ms or more per wake-up here.
+  (emrs-test--with-instance (inst "probe" :ok)
+    (emrs-call-sync inst '(:echo "warm up") 5)
+    (let ((count 0) (ends nil) (start (float-time)))
+      (emrs-call-stream inst '(:count :n 800 :capacity 8)
+                        :on-batch (lambda (items) (cl-incf count (length items)))
+                        :on-end (lambda (status _err) (push status ends)))
+      (should (emrs-test--wait (lambda () ends) 20))
+      (should (= count 800))
+      (should (< (- (float-time) start) 0.5)))))
+
 (ert-deftest emrs-test-large-stream-keeps-emacs-responsive ()
   (emrs-test--with-instance (inst "probe" :ok)
     (let* ((count 0) (ends nil) (ticks 0)

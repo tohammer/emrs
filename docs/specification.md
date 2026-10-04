@@ -455,6 +455,9 @@ file on disk is newer than the loaded one.
 - `emrs.el` creates one pipe process per module with `make-pipe-process`
   (`:noquery t`, no buffer, binary coding, filter `emrs--filter`) and passes it
   to `attach`.
+- The pipe process is created with `process-adaptive-read-buffering` bound to
+  nil. Before Emacs 31 that option defaults to t and delays reading after
+  one-byte reads by up to 50 ms, which would throttle every stream.
 - The runtime has one outbound FIFO per module and an atomic `wake-pending`
   flag. A producer that pushes sets the flag and, only on the transition from
   clear to set, writes one byte to the descriptor. The pipe therefore never
