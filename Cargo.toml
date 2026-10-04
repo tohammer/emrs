@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["emrs", "tests/emrs-test-module"]
+members = ["emrs", "tests/emrs-test-module", "examples/echo", "examples/grep"]
 
 [workspace.package]
 edition = "2024"
