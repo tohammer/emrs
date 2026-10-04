@@ -9,6 +9,10 @@ Nothing scheduled. Pick from `docs/backlog.md`.
 
 ## Watch out for
 
+- GitHub Actions are disabled (2026-10-04, Actions quota low): pull requests
+  get no CI. Run the test commands from the README locally, and re-enable with
+  `gh workflow enable CI` when the quota allows.
+
 - The CI job `Windows (best effort)` is allowed to fail, so a red Windows job
   does not block a merge. Check it anyway: it passes since the fix of ADR 0001
   (PR #2).
