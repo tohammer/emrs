@@ -3,6 +3,7 @@
 
 use crate::convert::de::from_lisp;
 use crate::convert::ser::SerError;
+use crate::crt;
 use crate::error::{Error, ErrorKind, Fail};
 use crate::ffi::env::{Env, Exit, Value};
 use crate::ffi::sys;
@@ -51,7 +52,7 @@ fn wake(fd: &Mutex<c_int>) {
     if *fd >= 0 {
         // A failed write means the pipe is gone; emrs.el re-attaches and drains.
         unsafe {
-            libc::write(*fd, b"!".as_ptr() as *const c_void, 1);
+            crt::write(*fd, b"!".as_ptr() as *const c_void, 1);
         }
     }
 }
@@ -62,7 +63,7 @@ fn replace_fd(fd: &Mutex<c_int>, new: c_int) {
     let old = std::mem::replace(&mut *fd, new);
     if old >= 0 {
         unsafe {
-            libc::close(old);
+            crt::close(old);
         }
     }
 }

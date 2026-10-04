@@ -5,14 +5,13 @@ architecture.md or an ADR.
 
 ## Next
 
-1. Investigate the Windows crash: get the real exit status in CI, then build
-   for `x86_64-pc-windows-gnu` to test the C runtime hypothesis (backlog
-   "Windows support", spec section 13.1).
+Nothing scheduled. Pick from `docs/backlog.md`.
 
 ## Watch out for
 
-- Windows is not supported. The CI job `Windows (best effort)` is allowed to
-  fail, so a red Windows job does not block a merge.
+- The CI job `Windows (best effort)` is allowed to fail, so a red Windows job
+  does not block a merge. Check it anyway: it passes since the fix of ADR 0001
+  (PR #2).
 - `docs/implementation-plan.md` shows the code before review. The repository
   is the current source.
 - A change to the protocol functions or delivery shapes must bump the

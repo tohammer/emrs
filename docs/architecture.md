@@ -27,6 +27,7 @@ Emacs.
 | `emrs/src/convert/` (`ser.rs`, `de.rs`) | `serde` serializer and deserializer that work directly on Lisp values (keyword-headed lists, plists) | `ffi`, `names` |
 | `emrs/src/names.rs` | Converts Rust identifiers to Lisp keyword names | — |
 | `emrs/src/runtime/` | Elastic thread pool (`pool.rs`), cancellation tokens (`cancel.rs`), outbound FIFO and instance table (`core.rs`), instance lifecycle (`instance.rs`), replies and bounded streams (`reply.rs`) | `payload`, `error` |
+| `emrs/src/crt.rs` | Writes and closes the wake-up descriptor in the C runtime that owns it; on Windows reads it from the import table of `emacs.exe` (ADR 0001) | `libc`, Windows `kernel32` |
 | `emrs/src/module.rs` | The eight protocol functions and the `module!` macro; wraps every body in `catch_unwind` | `ffi`, `convert`, `runtime` |
 | `emrs/src/testing.rs` | Host for testing services without Emacs | `runtime` |
 | `elisp/emrs.el` | Loads modules and checks their protocol version, owns the wake-up pipe process, drains deliveries and dispatches them to callbacks; public API `emrs-send`, `emrs-call`, `emrs-call-sync`, `emrs-call-stream`, `emrs-stop` | module protocol |
@@ -80,9 +81,12 @@ Emacs.
   that the wake-up write also takes, so a wake-up never writes to a reused
   descriptor number. `shutdown` leaves the descriptor open, because the user
   may cancel the exit.
-- On Windows, a module crashes Emacs at the first successful instance start.
-  The leading hypothesis is a C runtime mismatch: the module uses MSVC while
-  Emacs uses MinGW, so the descriptor from `open_channel` is invalid in the
-  module's runtime. Spec section 13.1 has the evidence.
+- A descriptor from `open_channel` is valid only in Emacs's C runtime. On
+  Windows, official Emacs uses `msvcrt.dll` and Rust modules use UCRT, with
+  either target; using the wrong one ended Emacs with `0xC0000409` in
+  `ucrtbase.dll` (ADR 0001, spec section 13.1).
+- Under Git Bash, a crashed native Windows process shows up only as exit
+  code 127. Run it from PowerShell for the real status, and read the
+  Application event log for the faulting module.
 - `copy_string_contents` returns the raw bytes of unibyte strings, including
   bytes above 127. No fallback is needed.

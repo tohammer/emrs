@@ -5,6 +5,7 @@
 //! never sees the Emacs module API.
 
 mod convert;
+mod crt;
 mod error;
 mod ffi;
 mod module;

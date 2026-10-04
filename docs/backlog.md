@@ -3,14 +3,25 @@
 Open points only. Delete an item when it is done; git keeps the history.
 Deferred review findings name their origin, the reason and when to revisit.
 
-## Windows support
+## Windows CI
 
-Modules crash Emacs on Windows as soon as the first service instance starts.
-The CI job `Windows (best effort)` fails on every run and is allowed to fail.
-The suspected cause is mismatched C runtimes: the module is built for MSVC,
-Emacs for MinGW, and the descriptor from `open_channel` is written from the
-MSVC side. Evidence, hypotheses and the planned investigation are in
-`docs/specs/2026-10-03-emrs-core.md` section 13.1.
+The Windows job stays best effort (`continue-on-error`), tests only the
+official Emacs 30.1 build (`msvcrt.dll`) with the MSVC target, and does not run
+the examples. Not covered: MSYS2 UCRT64 Emacs (the UCRT path of ADR 0001),
+the GNU target, Emacs 31. Origin: Windows crash fix, 2026-10-04; the owner
+chose to keep the job best effort. Revisit when Windows users report
+problems or before claiming Windows support.
+
+## Windows: closing the descriptor bypasses Emacs's bookkeeping
+
+`replace_fd` closes the old wake-up descriptor with the C runtime's `_close`.
+Emacs on Windows tracks descriptors in its own `fd_info` table and closes
+them through `sys_close`; whether a raw `_close` leaves a stale entry that
+affects a later descriptor with the same number has not been checked against
+the Emacs w32 sources. It only happens when the pipe process is replaced.
+Origin: review of PR #2 (Windows crash fix), 2026-10-04; deferred because it
+predates the fix and is untested. Revisit with the Windows CI work or on a
+report of misbehaving processes after a pipe repair.
 
 ## Resource handles and synchronous functions
 
