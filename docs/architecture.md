@@ -80,9 +80,11 @@ Emacs.
   that the wake-up write also takes, so a wake-up never writes to a reused
   descriptor number. `shutdown` leaves the descriptor open, because the user
   may cancel the exit.
-- On Windows, a module crashes Emacs at the first successful instance start.
-  The leading hypothesis is a C runtime mismatch: the module uses MSVC while
-  Emacs uses MinGW, so the descriptor from `open_channel` is invalid in the
-  module's runtime. Spec section 13.1 has the evidence.
+- On Windows, a module crashes Emacs at the first successful instance start
+  (`0xC0000409` in `ucrtbase.dll`). Emacs uses `msvcrt.dll`, but an MSVC-built
+  module writes the descriptor from `open_channel` through `ucrtbase.dll`.
+  A descriptor is only valid in the C runtime that created it. Under Git Bash,
+  a crashed native process shows up only as exit code 127, so run it from
+  PowerShell to see the real status. Spec section 13.1 has the evidence.
 - `copy_string_contents` returns the raw bytes of unibyte strings, including
   bytes above 127. No fallback is needed.

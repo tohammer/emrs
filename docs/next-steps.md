@@ -5,9 +5,11 @@ architecture.md or an ADR.
 
 ## Next
 
-1. Investigate the Windows crash: get the real exit status in CI, then build
-   for `x86_64-pc-windows-gnu` to test the C runtime hypothesis (backlog
-   "Windows support", spec section 13.1).
+1. Windows crash, step 2: build the test module for `x86_64-pc-windows-gnu`
+   (which uses `msvcrt.dll`, like Emacs) in the diagnostics workflow on the
+   branch `debug/windows-crash` and rerun. Step 1 pointed at the C runtime
+   mismatch (spec section 13.1, backlog "Windows support"). Delete
+   `.github/workflows/windows-debug.yml` when the investigation ends.
 
 ## Watch out for
 

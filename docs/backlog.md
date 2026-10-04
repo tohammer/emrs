@@ -7,9 +7,10 @@ Deferred review findings name their origin, the reason and when to revisit.
 
 Modules crash Emacs on Windows as soon as the first service instance starts.
 The CI job `Windows (best effort)` fails on every run and is allowed to fail.
-The suspected cause is mismatched C runtimes: the module is built for MSVC,
-Emacs for MinGW, and the descriptor from `open_channel` is written from the
-MSVC side. Evidence, hypotheses and the planned investigation are in
+The likely cause is mismatched C runtimes: Emacs uses `msvcrt.dll`, the
+module (MSVC target) writes the descriptor from `open_channel` through
+`ucrtbase.dll`, whose invalid-parameter handler ends the process with
+`0xC0000409`. Evidence, hypotheses and the planned investigation are in
 `docs/specs/2026-10-03-emrs-core.md` section 13.1.
 
 ## Resource handles and synchronous functions
