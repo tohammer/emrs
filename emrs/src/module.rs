@@ -51,7 +51,7 @@ fn wake(fd: &Mutex<c_int>) {
     if *fd >= 0 {
         // A failed write means the pipe is gone; emrs.el re-attaches and drains.
         unsafe {
-            libc::write(*fd, b"!".as_ptr() as *const c_void, 1);
+            crt::write(*fd, b"!".as_ptr() as *const c_void, 1);
         }
     }
 }
@@ -62,7 +62,70 @@ fn replace_fd(fd: &Mutex<c_int>, new: c_int) {
     let old = std::mem::replace(&mut *fd, new);
     if old >= 0 {
         unsafe {
-            libc::close(old);
+            crt::close(old);
+        }
+    }
+}
+
+/// Descriptor calls in the C runtime that owns the descriptor.
+#[cfg(not(windows))]
+mod crt {
+    pub use libc::{close, write};
+}
+
+/// Descriptor calls in the C runtime that owns the descriptor. On Windows
+/// `open_channel` returns a descriptor of Emacs's C runtime (`msvcrt.dll`),
+/// which the module's own runtime (UCRT) does not know. Experimental: see
+/// spec section 13.1.
+#[cfg(windows)]
+mod crt {
+    use std::os::raw::{c_char, c_int, c_uint, c_void};
+    use std::sync::OnceLock;
+
+    type WriteFn = unsafe extern "C" fn(c_int, *const c_void, c_uint) -> c_int;
+    type CloseFn = unsafe extern "C" fn(c_int) -> c_int;
+
+    unsafe extern "system" {
+        fn GetModuleHandleA(name: *const c_char) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    }
+
+    struct Msvcrt {
+        write: WriteFn,
+        close: CloseFn,
+    }
+
+    fn msvcrt() -> Option<&'static Msvcrt> {
+        static FNS: OnceLock<Option<Msvcrt>> = OnceLock::new();
+        FNS.get_or_init(|| unsafe {
+            let module = GetModuleHandleA(c"msvcrt.dll".as_ptr());
+            if module.is_null() {
+                return None;
+            }
+            let write = GetProcAddress(module, c"_write".as_ptr());
+            let close = GetProcAddress(module, c"_close".as_ptr());
+            if write.is_null() || close.is_null() {
+                return None;
+            }
+            Some(Msvcrt {
+                write: std::mem::transmute::<*mut c_void, WriteFn>(write),
+                close: std::mem::transmute::<*mut c_void, CloseFn>(close),
+            })
+        })
+        .as_ref()
+    }
+
+    pub unsafe fn write(fd: c_int, buf: *const c_void, len: c_uint) -> c_int {
+        match msvcrt() {
+            Some(m) => unsafe { (m.write)(fd, buf, len) },
+            None => unsafe { libc::write(fd, buf, len) },
+        }
+    }
+
+    pub unsafe fn close(fd: c_int) -> c_int {
+        match msvcrt() {
+            Some(m) => unsafe { (m.close)(fd) },
+            None => unsafe { libc::close(fd) },
         }
     }
 }
