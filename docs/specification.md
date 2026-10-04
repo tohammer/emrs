@@ -1,6 +1,8 @@
 # emrs — Specification
 
-Status: draft for review, 2026-10-03.
+Status: approved 2026-10-03 and implemented on the branch `emrs-core`
+(2026-10-04). Revised with the results of the prototype, a whole-branch review
+and the first CI runs; section 13 records what was verified and what is open.
 Source: `docs/brainstorming.md`, critically reviewed; every decision below was either
 confirmed by the project owner or is marked as a point to verify (section 13).
 
@@ -97,13 +99,17 @@ Cargo.toml                 workspace
 emrs/
   build.rs                 records the target triple
   src/lib.rs               public API, re-exports
-  src/ffi/                 private: sys.rs (struct layouts), env.rs, value.rs
-  src/serde/               ser.rs, de.rs, names.rs
-  src/runtime/             pool.rs, instance.rs, outbound.rs, cancel.rs,
-                           reply.rs, stream.rs
+  src/names.rs             identifier to keyword-name conversion
+  src/ffi/                 private: sys.rs (struct layouts), env.rs (checked
+                           wrapper), fake.rs (fake Emacs for unit tests)
+  src/convert/             ser.rs, de.rs (named `convert` because a module
+                           called `serde` would shadow the crate)
+  src/runtime/             pool.rs, cancel.rs, core.rs (outbound queue,
+                           instance table), instance.rs, reply.rs
   src/module.rs            protocol functions, `module!` macro
-  src/error.rs
+  src/error.rs, payload.rs
   src/testing.rs           host for testing services without Emacs
+  tests/runtime.rs         runtime behaviour tests
 elisp/emrs.el
 tests/emrs-test-module/    cdylib used by the ERT suite
 tests/elisp/               ERT tests
@@ -172,7 +178,7 @@ pub trait Service: Sized + Send + 'static {
 | `address() -> Address<S>` | A `Clone + Send` handle whose `send(req: S::Request)` enqueues a request into the instance's own mailbox. |
 | `cancel_token() -> CancelToken` | The instance token; cancelled when the instance stops or fails. |
 | `stop()` | Request the same shutdown as `emrs-stop`. |
-| `log(level, msg)` | Send a line to the `*emrs-log*` buffer. |
+| `log(level: Level, msg)` | Send a line to the `*emrs-log*` buffer. `Level` is `Debug`, `Info`, `Warn` or `Error`. |
 
 Self-messages reuse `Request`: a worker reports back with
 `ctx.address().send(Request::Indexed(..))`. Variants that Elisp must not send are
@@ -210,7 +216,10 @@ Mode mismatches (the mode is chosen by the Elisp caller, section 5):
 | `emrs-send` / `Address` | `stream()` | The sender is already cancelled. |
 
 A `Reply` dropped without an answer produces error `no-reply` for the caller.
-This also covers panics, because unwinding drops the reply.
+This also covers panics, because unwinding drops the reply. The one exception:
+if the reply's token is already cancelled, dropping it reports nothing, because
+the call is completed by whoever cancelled it (Elisp for a cancelled call, the
+instance's termination with `stopped` or `failed` otherwise).
 
 ### 4.5 StreamSender
 
@@ -225,7 +234,8 @@ This also covers panics, because unwinding drops the reply.
 | `token() -> CancelToken` | Same token as the originating `Reply`. |
 
 Dropping a sender without `finish` or `fail` yields `failed` with kind
-`no-reply`. `capacity` must be at least 1.
+`no-reply`, with the same exception for a cancelled token as for `Reply`. A
+`capacity` below 1 is treated as 1.
 
 ### 4.6 CancelToken
 
@@ -266,7 +276,9 @@ blanket `From` is possible and `?` works in `start`.
 
 - In `start`: the instance becomes `failed`.
 - In `handle` or `stop`: the instance becomes `failed`; the state is dropped
-  (drop panics are caught and logged); `stop` is not called.
+  (drop panics are caught and logged); `stop` is not called. The call whose
+  handler panicked ends with `no-reply` (its reply is dropped by the unwinding);
+  all other open calls end with `failed`.
 - In a spawned task: caught and logged; the instance keeps running. Replies and
   stream senders owned by the task are dropped and report `no-reply`.
 - In a protocol function on the Emacs thread: caught and signalled to Lisp as
@@ -274,10 +286,20 @@ blanket `From` is possible and `?` works in `start`.
 
 ### 4.10 Testing host
 
-`emrs::testing::Host<S>` runs a service without Emacs: `Host::start(args)`,
-`send(req)`, `call(req) -> Result<Box<dyn Any>, Error>` with typed downcast
-helpers, `call_stream(req)`, `events()`, `stop()`. It uses the real pool,
-mailbox, reply and stream code, replacing only the Lisp conversion and the pipe.
+`emrs::testing::Host<S>` runs a service without Emacs. It uses the real pool,
+mailbox, reply and stream code, replacing only the Lisp conversion and the
+pipe; answers come back as the Rust values the service produced.
+
+- `Host::start(args)`, `with_timeout(duration)` (default 5 s per operation).
+- `send(req)`; `call::<T>(req) -> Result<T, Error>`.
+- `call_stream::<T>(req) -> Result<StreamResult<T>, Error>`, or in steps:
+  `begin_stream(req) -> Result<u64, Error>`, `items_received(call)`,
+  `cancel(call)`, `finish_stream::<T>(call) -> StreamResult<T>`.
+  `StreamResult` has `items`, `status: StreamEnd` (`Done` or `Failed`) and
+  `error`.
+- `next_event() -> Option<S::Event>`.
+- `state()`, `wait_for_state(state)`, `stop() -> State`,
+  `wait_exit() -> (State, Option<Error>)`, `logs()`.
 
 ## 5. Elisp API (`emrs.el`)
 
@@ -328,10 +350,13 @@ mailbox, reply and stream code, replacing only the Lisp conversion and the pipe.
   quits. On timeout the call is cancelled and kind `timeout` is signalled.
 - `C-g` cancels the call and the quit propagates normally.
 - The wait loop drains the module directly and then sleeps in
-  `accept-process-output` on the module's pipe process, so it wakes when data
-  arrives (see 13.3).
+  `accept-process-output` on the module's pipe process, in slices of at most
+  0.1 s, so it wakes when data arrives (see section 13, item 3).
 - While waiting, other deliveries of the same module are dispatched: event
   handlers and other callbacks may run. This reentrancy is documented.
+- Called from inside an emrs callback, it dispatches only its own reply.
+  All other deliveries stay queued in order until that callback returns, which
+  preserves delivery order and bounds the nesting depth.
 
 ### 5.3 Errors
 
@@ -389,7 +414,7 @@ For a module named `M`, `emacs_module_init` defines:
 | `(M--emrs-cancel ID CALL-ID)` | Cancels the call's token and discards its queued deliveries. |
 | `(M--emrs-stop ID)` | Starts the stop sequence of section 7. |
 | `(M--emrs-drain MAX)` | Returns a list of at most `MAX` deliveries. |
-| `(M--emrs-shutdown TIMEOUT)` | Cancels all instances and blocks up to `TIMEOUT` seconds. |
+| `(M--emrs-shutdown TIMEOUT)` | Stops all instances and blocks up to `TIMEOUT` seconds. Returns `t` if all terminated in time. |
 
 Instance ids are allocated by the module (positive integers, never reused within
 a session). Call ids are allocated by `emrs.el` per instance.
@@ -431,6 +456,9 @@ file on disk is newer than the loaded one.
 - `emrs.el` creates one pipe process per module with `make-pipe-process`
   (`:noquery t`, no buffer, binary coding, filter `emrs--filter`) and passes it
   to `attach`.
+- The pipe process is created with `process-adaptive-read-buffering` bound to
+  nil. Before Emacs 31 that option defaults to t and delays reading after
+  one-byte reads by up to 50 ms, which would throttle every stream.
 - The runtime has one outbound FIFO per module and an atomic `wake-pending`
   flag. A producer that pushes sets the flag and, only on the transition from
   clear to set, writes one byte to the descriptor. The pipe therefore never
@@ -439,18 +467,31 @@ file on disk is newer than the loaded one.
   first, converts up to `MAX` deliveries, and, if the FIFO is still non-empty,
   sets the flag and writes a byte again. Emacs thus returns to its command loop
   between drains.
+- `emrs.el` calls `drain` with quitting inhibited and appends the result to a
+  per-module Lisp queue; one dispatch loop per module pops from its head. A
+  drain triggered from inside a callback only appends. A non-local exit from a
+  callback leaves the rest queued and schedules the loop to resume.
+- A panic inside a user `Serialize` impl during `drain` is caught and reported
+  as an `encode` error for that value only.
 - Consecutive queued items of one stream are merged into a single `items`
   delivery. This is the only batching mechanism; authors configure capacity
   only.
 - A stream's in-flight count rises on `send` and falls when the item is
   converted in `drain`. This implements backpressure.
+- Queued items are discarded only for a call that was cancelled (from Elisp,
+  or because one of its items could not be encoded). Stopping an instance
+  does not discard items already queued, so a stream that finished before the
+  stop is delivered completely.
 - Order is preserved across everything a module delivers, because there is a
   single FIFO.
 - A value whose conversion fails becomes an `error` delivery with kind `encode`
   (calls and streams; a stream then ends `failed`) or a `log` delivery (events).
 - If the pipe process dies, its sentinel creates a new one and calls `attach`
   again, then drains once.
-- The runtime closes the descriptor in `shutdown`.
+- The descriptor is closed when a new pipe is attached, under a lock shared
+  with the wake-up write, so a wake-up never writes to a reused descriptor
+  number. `shutdown` leaves it open: if the user cancels the exit, the module
+  must still be able to wake Emacs, and the process exit closes it anyway.
 
 ### 6.4 FFI rules
 
@@ -550,7 +591,7 @@ Decoding is directed by the Rust type.
 | float | float or integer |
 | `char` | character, or string of length 1 |
 | `String` | string |
-| bytes | unibyte string (see 13.2), or multibyte string as UTF-8 |
+| bytes | unibyte string (see section 13, item 2), or multibyte string as UTF-8 |
 | `Option<T>` | `nil` → `None`, otherwise `Some` |
 | unit | `nil` |
 | sequence, tuple | proper list or vector; tuples check the length |
@@ -558,10 +599,11 @@ Decoding is directed by the Rust type.
 | struct | plist with keyword keys; unknown and missing keys follow the type's `serde` attributes |
 | enum | list headed by the variant keyword; a bare keyword for a unit variant |
 
-- Type mismatches, improper lists and out-of-range numbers are `decode` errors
-  whose message names the path to the offending value.
-- Nesting deeper than 128 levels is a `decode` error. Circular lists are not
-  detected and must not be sent.
+- Type mismatches and out-of-range numbers are `decode` errors whose message
+  names the path to the offending value.
+- Dotted and circular lists are `decode` errors: every list is checked with
+  `proper-list-p` before it is read, so a circular list cannot hang Emacs.
+- Nesting deeper than 128 levels is a `decode` error.
 - Self-describing decoding (`deserialize_any`: `serde_json::Value`, untagged,
   internally or adjacently tagged enums) is best-effort: `nil` → unit, `t` →
   true, numbers, strings, symbol → string, vector → sequence, hash table → map,
@@ -663,9 +705,10 @@ Each item arrives as `(:path "/src/a.rs" :line-number 42 :preview "…")`.
 - **Elisp behaviour**: exactly-once callbacks, cancel races, `emrs-call-sync`
   with timeout and simulated quit, callback errors, pipe process loss,
   protocol-version rejection.
-- **CI matrix**: Emacs 30.x and 31.x on Linux x86_64, Linux aarch64 and macOS
-  aarch64 are required. macOS x86_64 is built, and tested where a runner is
-  available. Windows x86_64 runs and may fail.
+- **CI matrix** (runs on pull requests): Emacs 30.1 and 31.1 on Linux x86_64,
+  Linux aarch64 and macOS aarch64 are required, as are the Rust checks and a
+  build with Rust 1.85. macOS x86_64 is built but not tested. Windows x86_64
+  runs and may fail; it currently does (section 13.1).
 
 ## 12. Acceptance criteria
 
@@ -682,20 +725,80 @@ Each item arrives as `(:path "/src/a.rs" :line-number 42 :preview "…")`.
    run side by side.
 7. The whole ERT suite passes under `--module-assertions`.
 
-## 13. Points to verify during implementation
+## 13. Verification status and open issues
 
-These are assumptions the design depends on that have not been tested. Each has
-a fallback.
+Items 2 and 3 were verified with a prototype on Emacs 31.1 and are confirmed by
+CI on Emacs 30.1 and 31.1 (Linux x86_64, Linux aarch64, macOS aarch64).
 
-1. **Windows descriptor**: that the descriptor returned by `open_channel` on
-   Windows can be written from Rust through the C runtime. Fallback: Windows
-   stays unsupported until solved.
-2. **Raw bytes from unibyte strings**: whether `copy_string_contents` can
-   return non-ASCII raw bytes. Fallback: convert through a Lisp call that maps
-   bytes to characters 0–255 and decode those in Rust.
-3. **Waking `accept-process-output`**: that it returns when the pipe receives
-   data even if called from within that process's filter (nested
-   `emrs-call-sync`). Fallback: wait in slices of 10 ms and drain directly.
+1. **Windows**: open; see 13.1 below.
+2. **Raw bytes from unibyte strings**: verified. `copy_string_contents`
+   returns the raw bytes of a unibyte string, including bytes above 127. No
+   fallback is needed.
+3. **Waking `accept-process-output`**: verified. It returns as soon as the pipe
+   receives data, also when called from within that process's own filter, and
+   the filter runs re-entrantly. `emrs-call-sync` still drains directly on
+   every loop turn, so it does not depend on this.
+
+4. **Read buffering on Emacs 30**: found by CI and fixed. Before Emacs 31,
+   `process-adaptive-read-buffering` delays reading after one-byte reads; the
+   wake-up pipe is created with it disabled (section 6.3).
+
+### 13.1 Windows: modules crash Emacs (open)
+
+Windows is not supported at present. The CI job `Windows (best effort)` fails
+the same way on every run and is allowed to fail.
+
+Observed (Emacs 30.1 from `jcs090218/setup-emacs-windows`, Rust stable with
+its default Windows target, `tests/run-ert.sh` under Git Bash, 2026-10-04):
+
+```text
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.86s
+Running 45 tests (2026-10-04 08:09:13+0000, selector `t')
+   passed   1/45  emrs-test-bad-start-args (0.002670 sec)
+Error: Process completed with exit code 127.
+```
+
+What this establishes:
+
+- The module builds, loads and initialises. The first test passes, and it
+  loads the module, runs the handshake (`info`), creates the pipe process,
+  calls `attach` (`open_channel`) and gets a decode error back from `start`.
+  So function definition, `open_channel`, argument decoding and error
+  signalling work.
+- Emacs dies during the second test, `emrs-test-bytes-round-trip`, with no
+  Lisp error, no Rust panic message and no ERT output. That test is the first
+  to start an instance successfully. Compared with the first test it adds: a
+  pool thread running the service, the first wake-up write to the pipe
+  descriptor from that thread, the first `drain`, and a unibyte string
+  round trip.
+
+Not established: which of those steps kills the process. Nothing below has
+been tested.
+
+Hypotheses, most likely first:
+
+1. **Mismatched C runtimes.** `open_channel` returns a C-runtime file
+   descriptor. Descriptor tables are private to each C runtime. Emacs for
+   Windows is built with MinGW, while Rust's default Windows target is MSVC, so
+   `libc::write` in the module may run in a different C runtime in which that
+   descriptor number is invalid. An invalid descriptor triggers the runtime's
+   invalid-parameter handler, which terminates the process without a message.
+   This fits the symptom and its timing (the first wake-up write).
+2. **A fault in the first drain or in thread start-up** specific to Windows,
+   for example in `make_unibyte_string` or `copy_string_contents`.
+
+Suggested investigation, in order:
+
+1. Run the failing step by hand in the CI job to get the real exit status and
+   any crash output (`emacs --batch ... ; echo $?`), and run only the
+   `emrs-test-call-runs-callback-once` test, which avoids unibyte strings, to
+   separate hypothesis 1 from 2.
+2. Build the module for `x86_64-pc-windows-gnu`, which uses the same C runtime
+   family as Emacs, and rerun. If that passes, hypothesis 1 is confirmed.
+3. If so, either require the GNU target on Windows (document it and check it
+   in `module!`), or stop using the descriptor through the C runtime: obtain
+   the operating-system handle for it inside Emacs's runtime and write with
+   `WriteFile`.
 
 ## 14. Future work and constraints kept for it
 
