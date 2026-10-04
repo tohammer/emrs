@@ -8,9 +8,9 @@
 
 **Tech Stack:** Rust (edition 2024), `serde`, `libc`; Emacs Lisp (Emacs 30.1+), ERT; shell scripts for the Emacs test runs; GitHub Actions.
 
-**Status: executed.** Tasks 1 to 12 are committed on the branch `emrs-core`. Later commits on that branch supersede some of the code blocks below: "fix: review findings" (changes `elisp/emrs.el`, `emrs/src/module.rs`, `emrs/src/runtime/{core,instance,reply}.rs` and the tests), "ci: run only on pull requests", and "fix: disable adaptive read buffering on the wake-up pipe" (`elisp/emrs.el`). The repository is the current source; this document is kept as the record of how the first version was built. The statements under "Verification status" and "Not verified" describe the day the plan was written; `docs/specification.md` section 13 has the current status.
+**Status: executed.** Tasks 1 to 12 are committed on the branch `emrs-core`. Later commits on that branch supersede some of the code blocks below: "fix: review findings" (changes `elisp/emrs.el`, `emrs/src/module.rs`, `emrs/src/runtime/{core,instance,reply}.rs` and the tests), "ci: run only on pull requests", and "fix: disable adaptive read buffering on the wake-up pipe" (`elisp/emrs.el`). The repository is the current source; this document is kept as the record of how the first version was built. The statements under "Verification status" and "Not verified" describe the day the plan was written; `docs/specs/2026-10-03-emrs-core.md` section 13 has the current status.
 
-**Spec:** `docs/specification.md`. Executors read both documents; the plan implements the spec section by section.
+**Spec:** `docs/specs/2026-10-03-emrs-core.md`. Executors read both documents; the plan implements the spec section by section.
 
 **Verification status of this plan:** every code block below was built and every test was run on 2026-10-03 with Rust 1.97 and Emacs 31.1 on Linux x86_64, at each task boundary (Tasks 1 to 9 as separate staged workspaces, Tasks 10 and 11 on the complete workspace). Final results: `cargo test --workspace` 51 unit tests and 24 runtime tests pass, `cargo clippy -- -D warnings` and `cargo fmt --check` are clean, `tests/run-ert.sh` passes 37 of 37 with `--module-assertions`, `examples/run-examples.sh` passes 3 of 3. **Not verified:** the GitHub Actions workflow (Task 12), Rust 1.85, Emacs 30, macOS, and Windows.
 
@@ -7255,7 +7255,7 @@ Emacs thread and never sees the Emacs module API.
 - `emrs/` is the Rust crate.
 - `elisp/emrs.el` is the companion Elisp library (Emacs 30.1 or later).
 - `examples/` holds two complete modules: `echo` and a streaming `grep`.
-- `docs/specification.md` is the full specification.
+- `docs/specs/2026-10-03-emrs-core.md` is the full specification.
 
 ## A module in 25 lines
 
