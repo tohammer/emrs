@@ -1,0 +1,15 @@
+[package]
+name = "emrs-test-module"
+version = "0.1.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+emrs = { path = "../../emrs" }
+serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
