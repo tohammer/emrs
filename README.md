@@ -71,7 +71,7 @@ Emacs cannot unload a module; restart Emacs to load a new build.
 | Linux x86_64 and aarch64 | Supported; tested in CI with Emacs 30.1 and 31.1 |
 | macOS aarch64 | Supported; tested in CI with Emacs 30.1 and 31.1 |
 | macOS x86_64 | Builds in CI; not tested |
-| Windows x86_64 | Best effort: the ERT suite passes in CI with the official Emacs 30.1 build, for the MSVC and GNU Rust targets. MSYS2 UCRT64 Emacs builds are not tested. |
+| Windows x86_64 | Best effort: the ERT suite passes in CI with the official Emacs 30.1 build and the default (MSVC) Rust target. The GNU target passed in a one-off run. MSYS2 UCRT64 Emacs builds are not tested. |
 
 The minimum Rust version is 1.85. The minimum Emacs version is 30.1.
 
