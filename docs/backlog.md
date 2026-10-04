@@ -3,15 +3,14 @@
 Open points only. Delete an item when it is done; git keeps the history.
 Deferred review findings name their origin, the reason and when to revisit.
 
-## Windows support
+## Windows CI
 
-Modules crash Emacs on Windows as soon as the first service instance starts.
-The CI job `Windows (best effort)` fails on every run and is allowed to fail.
-The confirmed cause is mismatched C runtimes: Emacs uses `msvcrt.dll`, the
-module (MSVC target) writes the descriptor from `open_channel` through
-`ucrtbase.dll`, whose invalid-parameter handler ends the process with
-`0xC0000409`. Evidence, hypotheses and the planned investigation are in
-`docs/specs/2026-10-03-emrs-core.md` section 13.1.
+The Windows job stays best effort (`continue-on-error`), tests only the
+official Emacs 30.1 build (`msvcrt.dll`) with the MSVC target, and does not run
+the examples. Not covered: MSYS2 UCRT64 Emacs (the UCRT path of ADR 0001),
+the GNU target, Emacs 31. Origin: Windows crash fix, 2026-10-04; the owner
+chose to keep the job best effort. Revisit when Windows users report
+problems or before claiming Windows support.
 
 ## Resource handles and synchronous functions
 

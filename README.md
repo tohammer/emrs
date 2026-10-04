@@ -7,7 +7,8 @@ messages are the only boundary between them. Service code never runs on the
 Emacs thread and never sees the Emacs module API.
 
 Status: the core is implemented and tested on Linux and macOS with Emacs 30
-and 31. Windows is not supported yet (see below).
+and 31. Windows works with the official Emacs build but is tested less (see
+below).
 
 - `emrs/` is the Rust crate.
 - `elisp/emrs.el` is the companion Elisp library (Emacs 30.1 or later).
@@ -70,7 +71,7 @@ Emacs cannot unload a module; restart Emacs to load a new build.
 | Linux x86_64 and aarch64 | Supported; tested in CI with Emacs 30.1 and 31.1 |
 | macOS aarch64 | Supported; tested in CI with Emacs 30.1 and 31.1 |
 | macOS x86_64 | Builds in CI; not tested |
-| Windows | Not working: a module crashes Emacs when its first service instance starts. Section 13.1 of the specification records the evidence and the next steps. |
+| Windows x86_64 | Best effort: the ERT suite passes in CI with the official Emacs 30.1 build, for the MSVC and GNU Rust targets. MSYS2 UCRT64 Emacs builds are not tested. |
 
 The minimum Rust version is 1.85. The minimum Emacs version is 30.1.
 
