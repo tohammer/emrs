@@ -1,7 +1,8 @@
 # emrs — Specification
 
-Status: approved 2026-10-03; revised the same day with the results of a
-prototype (see section 13 and `docs/implementation-plan.md`).
+Status: approved 2026-10-03 and implemented on the branch `emrs-core`
+(2026-10-04). Revised with the results of the prototype, a whole-branch review
+and the first CI runs; section 13 records what was verified and what is open.
 Source: `docs/brainstorming.md`, critically reviewed; every decision below was either
 confirmed by the project owner or is marked as a point to verify (section 13).
 
@@ -350,7 +351,7 @@ pipe; answers come back as the Rust values the service produced.
 - `C-g` cancels the call and the quit propagates normally.
 - The wait loop drains the module directly and then sleeps in
   `accept-process-output` on the module's pipe process, in slices of at most
-  0.1 s, so it wakes when data arrives (see 13.3).
+  0.1 s, so it wakes when data arrives (see section 13, item 3).
 - While waiting, other deliveries of the same module are dispatched: event
   handlers and other callbacks may run. This reentrancy is documented.
 - Called from inside an emrs callback, it dispatches only its own reply.
@@ -590,7 +591,7 @@ Decoding is directed by the Rust type.
 | float | float or integer |
 | `char` | character, or string of length 1 |
 | `String` | string |
-| bytes | unibyte string (see 13.2), or multibyte string as UTF-8 |
+| bytes | unibyte string (see section 13, item 2), or multibyte string as UTF-8 |
 | `Option<T>` | `nil` → `None`, otherwise `Some` |
 | unit | `nil` |
 | sequence, tuple | proper list or vector; tuples check the length |
@@ -704,9 +705,10 @@ Each item arrives as `(:path "/src/a.rs" :line-number 42 :preview "…")`.
 - **Elisp behaviour**: exactly-once callbacks, cancel races, `emrs-call-sync`
   with timeout and simulated quit, callback errors, pipe process loss,
   protocol-version rejection.
-- **CI matrix**: Emacs 30.x and 31.x on Linux x86_64, Linux aarch64 and macOS
-  aarch64 are required. macOS x86_64 is built, and tested where a runner is
-  available. Windows x86_64 runs and may fail.
+- **CI matrix** (runs on pull requests): Emacs 30.1 and 31.1 on Linux x86_64,
+  Linux aarch64 and macOS aarch64 are required, as are the Rust checks and a
+  build with Rust 1.85. macOS x86_64 is built but not tested. Windows x86_64
+  runs and may fail; it currently does (section 13.1).
 
 ## 12. Acceptance criteria
 
@@ -723,14 +725,12 @@ Each item arrives as `(:path "/src/a.rs" :line-number 42 :preview "…")`.
    run side by side.
 7. The whole ERT suite passes under `--module-assertions`.
 
-## 13. Points to verify during implementation
+## 13. Verification status and open issues
 
-Status after the prototype of 2026-10-03 (Emacs 31.1, Linux x86_64):
+Items 2 and 3 were verified with a prototype on Emacs 31.1 and are confirmed by
+CI on Emacs 30.1 and 31.1 (Linux x86_64, Linux aarch64, macOS aarch64).
 
-1. **Windows descriptor**: open. That the descriptor returned by
-   `open_channel` on Windows can be written from Rust through the C runtime is
-   untested. The Windows CI job is the test; until it passes, Windows stays
-   best-effort.
+1. **Windows**: open; see 13.1 below.
 2. **Raw bytes from unibyte strings**: verified. `copy_string_contents`
    returns the raw bytes of a unibyte string, including bytes above 127. No
    fallback is needed.
@@ -739,8 +739,66 @@ Status after the prototype of 2026-10-03 (Emacs 31.1, Linux x86_64):
    the filter runs re-entrantly. `emrs-call-sync` still drains directly on
    every loop turn, so it does not depend on this.
 
-Items 2 and 3 were verified on Emacs 31.1 only; the CI run on Emacs 30 confirms
-them for the minimum version.
+4. **Read buffering on Emacs 30**: found by CI and fixed. Before Emacs 31,
+   `process-adaptive-read-buffering` delays reading after one-byte reads; the
+   wake-up pipe is created with it disabled (section 6.3).
+
+### 13.1 Windows: modules crash Emacs (open)
+
+Windows is not supported at present. The CI job `Windows (best effort)` fails
+the same way on every run and is allowed to fail.
+
+Observed (Emacs 30.1 from `jcs090218/setup-emacs-windows`, Rust stable with
+its default Windows target, `tests/run-ert.sh` under Git Bash, 2026-10-04):
+
+```text
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.86s
+Running 45 tests (2026-10-04 08:09:13+0000, selector `t')
+   passed   1/45  emrs-test-bad-start-args (0.002670 sec)
+Error: Process completed with exit code 127.
+```
+
+What this establishes:
+
+- The module builds, loads and initialises. The first test passes, and it
+  loads the module, runs the handshake (`info`), creates the pipe process,
+  calls `attach` (`open_channel`) and gets a decode error back from `start`.
+  So function definition, `open_channel`, argument decoding and error
+  signalling work.
+- Emacs dies during the second test, `emrs-test-bytes-round-trip`, with no
+  Lisp error, no Rust panic message and no ERT output. That test is the first
+  to start an instance successfully. Compared with the first test it adds: a
+  pool thread running the service, the first wake-up write to the pipe
+  descriptor from that thread, the first `drain`, and a unibyte string
+  round trip.
+
+Not established: which of those steps kills the process. Nothing below has
+been tested.
+
+Hypotheses, most likely first:
+
+1. **Mismatched C runtimes.** `open_channel` returns a C-runtime file
+   descriptor. Descriptor tables are private to each C runtime. Emacs for
+   Windows is built with MinGW, while Rust's default Windows target is MSVC, so
+   `libc::write` in the module may run in a different C runtime in which that
+   descriptor number is invalid. An invalid descriptor triggers the runtime's
+   invalid-parameter handler, which terminates the process without a message.
+   This fits the symptom and its timing (the first wake-up write).
+2. **A fault in the first drain or in thread start-up** specific to Windows,
+   for example in `make_unibyte_string` or `copy_string_contents`.
+
+Suggested investigation, in order:
+
+1. Run the failing step by hand in the CI job to get the real exit status and
+   any crash output (`emacs --batch ... ; echo $?`), and run only the
+   `emrs-test-call-runs-callback-once` test, which avoids unibyte strings, to
+   separate hypothesis 1 from 2.
+2. Build the module for `x86_64-pc-windows-gnu`, which uses the same C runtime
+   family as Emacs, and rerun. If that passes, hypothesis 1 is confirmed.
+3. If so, either require the GNU target on Windows (document it and check it
+   in `module!`), or stop using the descriptor through the C runtime: obtain
+   the operating-system handle for it inside Emacs's runtime and write with
+   `WriteFile`.
 
 ## 14. Future work and constraints kept for it
 

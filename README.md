@@ -6,6 +6,9 @@ Rust owns threads and state, Emacs owns its event loop and UI, and typed
 messages are the only boundary between them. Service code never runs on the
 Emacs thread and never sees the Emacs module API.
 
+Status: the core is implemented and tested on Linux and macOS with Emacs 30
+and 31. Windows is not supported yet (see below).
+
 - `emrs/` is the Rust crate.
 - `elisp/emrs.el` is the companion Elisp library (Emacs 30.1 or later).
 - `examples/` holds two complete modules: `echo` and a streaming `grep`.
@@ -60,6 +63,17 @@ emrs::module!("echo-rs", [Echo]);
 
 Emacs cannot unload a module; restart Emacs to load a new build.
 
+## Platform support
+
+| Platform | Status |
+|---|---|
+| Linux x86_64 and aarch64 | Supported; tested in CI with Emacs 30.1 and 31.1 |
+| macOS aarch64 | Supported; tested in CI with Emacs 30.1 and 31.1 |
+| macOS x86_64 | Builds in CI; not tested |
+| Windows | Not working: a module crashes Emacs when its first service instance starts. Section 13.1 of the specification records the evidence and the next steps. |
+
+The minimum Rust version is 1.85. The minimum Emacs version is 30.1.
+
 ## Tests
 
 ```sh
@@ -67,6 +81,20 @@ cargo test --workspace     # runtime and data mapping, no Emacs needed
 tests/run-ert.sh           # end to end in Emacs, with module assertions
 examples/run-examples.sh   # the example modules
 ```
+
+Set `EMACS` to run the Emacs suites with another binary, for example
+`EMACS=/path/to/emacs-30 tests/run-ert.sh`. CI runs all of this on pull
+requests.
+
+## Documentation
+
+- `docs/specification.md`: what emrs does and why, including the Lisp data
+  mapping (section 8), the module protocol (section 6) and open issues
+  (section 13).
+- `docs/implementation-plan.md`: the task-by-task plan the first version was
+  built from. Its code blocks show the state before review; the repository is
+  the current source.
+- `docs/brainstorming.md`: the original brainstorming transcript.
 
 ## Licence
 

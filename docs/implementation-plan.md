@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust (edition 2024), `serde`, `libc`; Emacs Lisp (Emacs 30.1+), ERT; shell scripts for the Emacs test runs; GitHub Actions.
 
-**Status: executed.** Tasks 1 to 12 are committed on the branch `emrs-core`. A whole-branch review afterwards led to one further commit ("fix: review findings") that changes `elisp/emrs.el`, `emrs/src/module.rs`, `emrs/src/runtime/{core,instance,reply}.rs` and the tests. The code blocks below show those files as they were before that commit; the repository is the current source.
+**Status: executed.** Tasks 1 to 12 are committed on the branch `emrs-core`. Later commits on that branch supersede some of the code blocks below: "fix: review findings" (changes `elisp/emrs.el`, `emrs/src/module.rs`, `emrs/src/runtime/{core,instance,reply}.rs` and the tests), "ci: run only on pull requests", and "fix: disable adaptive read buffering on the wake-up pipe" (`elisp/emrs.el`). The repository is the current source; this document is kept as the record of how the first version was built. The statements under "Verification status" and "Not verified" describe the day the plan was written; `docs/specification.md` section 13 has the current status.
 
 **Spec:** `docs/specification.md`. Executors read both documents; the plan implements the spec section by section.
 
