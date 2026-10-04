@@ -48,7 +48,11 @@ keeps Emacs more responsive under load at some cost in throughput."
 
 (cl-defstruct (emrs--module (:constructor emrs--make-module) (:copier nil))
   name info pipe file mtime
-  (instances (make-hash-table :test 'eql)))
+  (instances (make-hash-table :test 'eql))
+  ;; Deliveries fetched from the module and not yet dispatched, oldest first.
+  pending
+  ;; Non-nil while the dispatch loop of this module is running.
+  dispatching)
 
 (cl-defstruct (emrs-instance (:constructor emrs--make-instance) (:copier nil))
   "A running service instance.  Create with `emrs-start'."
@@ -62,9 +66,6 @@ keeps Emacs more responsive under load at some cost in throughput."
 
 (defvar emrs--modules (make-hash-table :test 'eq)
   "Loaded modules by name symbol.")
-
-(defvar emrs--shutting-down nil
-  "Non-nil while Emacs is exiting.")
 
 ;;;; Helpers
 
@@ -118,8 +119,7 @@ WHAT names the callback for the message."
                 :coding 'binary
                 :filter (lambda (_process _string) (emrs--drain m))
                 :sentinel (lambda (process _event)
-                            (when (and (not emrs--shutting-down)
-                                       (not (process-live-p process))
+                            (when (and (not (process-live-p process))
                                        (eq process (emrs--module-pipe m)))
                               (emrs--attach m)
                               (emrs--drain m))))))
@@ -222,10 +222,44 @@ Keys: :protocol :emrs :module :version :services :target."
         (emrs--protect "on-batch" f payload)))
      ((eq kind 'end) (emrs--complete call (car payload) (cdr payload))))))
 
+(defun emrs--fetch (m)
+  "Move deliveries from module M into its Lisp queue.
+Quitting is inhibited: the module has already removed these deliveries
+from its own queue, so a quit during the conversion would lose them."
+  (let ((new (let ((inhibit-quit t))
+               (funcall (emrs--fn (emrs--module-name m) 'drain) emrs-drain-max))))
+    (setf (emrs--module-pending m) (nconc (emrs--module-pending m) new))))
+
 (defun emrs--drain (m)
-  "Fetch pending deliveries of module M and dispatch them."
-  (dolist (delivery (funcall (emrs--fn (emrs--module-name m) 'drain) emrs-drain-max))
-    (emrs--dispatch m delivery)))
+  "Fetch the deliveries of module M and dispatch them in order.
+When called from inside a callback, only fetch.  The dispatch loop that
+is already running continues with the queue, which keeps deliveries in
+order and bounds the nesting depth."
+  (emrs--fetch m)
+  (unless (emrs--module-dispatching m)
+    (setf (emrs--module-dispatching m) t)
+    (unwind-protect
+        (while (emrs--module-pending m)
+          (emrs--dispatch m (pop (emrs--module-pending m))))
+      (setf (emrs--module-dispatching m) nil)
+      ;; A non-local exit from a callback leaves deliveries queued.
+      (when (emrs--module-pending m)
+        (run-at-time 0 nil #'emrs--drain m)))))
+
+(defun emrs--dispatch-own (m call)
+  "Dispatch the queued completion of CALL in module M ahead of its turn.
+Used by `emrs-call-sync' when it runs inside a callback, where the
+dispatch loop is suspended."
+  (let* ((instance-id (emrs-instance-id (emrs-call-instance call)))
+         (call-id (emrs-call-id call))
+         (own (cl-find-if (lambda (delivery)
+                            (and (memq (aref delivery 0) '(reply error))
+                                 (eql (aref delivery 1) instance-id)
+                                 (eql (aref delivery 2) call-id)))
+                          (emrs--module-pending m))))
+    (when own
+      (setf (emrs--module-pending m) (delq own (emrs--module-pending m)))
+      (emrs--dispatch m own))))
 
 ;;;; Public API
 
@@ -255,11 +289,14 @@ Return the call object, or nil when MODE is nil."
       (let* ((call-id (cl-incf (emrs-instance-next-call inst)))
              (call (apply #'emrs--make-call :instance inst :id call-id :mode mode slots)))
         (puthash call-id call (emrs-instance-calls inst))
-        (condition-case err
-            (funcall send id request call-id mode)
-          (error
-           (remhash call-id (emrs-instance-calls inst))
-           (signal (car err) (cdr err))))
+        (let ((sent nil))
+          (unwind-protect
+              (progn (funcall send id request call-id mode)
+                     (setq sent t))
+            ;; Reached with SENT nil on any non-local exit, including a quit.
+            (unless sent
+              (setf (emrs-call-done call) t)
+              (remhash call-id (emrs-instance-calls inst)))))
         call))))
 
 (defun emrs-send (instance request)
@@ -299,7 +336,10 @@ TIMEOUT (seconds), give up after that long with kind `timeout';
 otherwise wait until the reply arrives.  \\[keyboard-quit] cancels the call.
 
 While waiting, other deliveries of the same module are dispatched, so
-event handlers and other callbacks may run."
+event handlers and other callbacks may run.  The exception is a call
+made from inside an emrs callback: there, only this call's reply is
+dispatched and everything else waits, in order, until that callback
+returns."
   (let* ((m (emrs-instance-module instance))
          (deadline (and timeout (+ (float-time) timeout)))
          (finished nil) (reply nil) (failure nil)
@@ -309,6 +349,8 @@ event handlers and other callbacks may run."
     (unwind-protect
         (while (not finished)
           (emrs--drain m)
+          (when (and (not finished) (emrs--module-dispatching m))
+            (emrs--dispatch-own m call))
           (unless finished
             (let ((remaining (and deadline (- deadline (float-time)))))
               (if (and remaining (<= remaining 0))
@@ -338,7 +380,6 @@ event handlers and other callbacks may run."
 
 (defun emrs--shutdown ()
   "Stop all instances of all modules, waiting `emrs-shutdown-timeout'."
-  (setq emrs--shutting-down t)
   (maphash (lambda (name _m)
              (ignore-errors
                (funcall (emrs--fn name 'shutdown) emrs-shutdown-timeout)))

@@ -8,6 +8,8 @@
 
 **Tech Stack:** Rust (edition 2024), `serde`, `libc`; Emacs Lisp (Emacs 30.1+), ERT; shell scripts for the Emacs test runs; GitHub Actions.
 
+**Status: executed.** Tasks 1 to 12 are committed on the branch `emrs-core`. A whole-branch review afterwards led to one further commit ("fix: review findings") that changes `elisp/emrs.el`, `emrs/src/module.rs`, `emrs/src/runtime/{core,instance,reply}.rs` and the tests. The code blocks below show those files as they were before that commit; the repository is the current source.
+
 **Spec:** `docs/specification.md`. Executors read both documents; the plan implements the spec section by section.
 
 **Verification status of this plan:** every code block below was built and every test was run on 2026-10-03 with Rust 1.97 and Emacs 31.1 on Linux x86_64, at each task boundary (Tasks 1 to 9 as separate staged workspaces, Tasks 10 and 11 on the complete workspace). Final results: `cargo test --workspace` 51 unit tests and 24 runtime tests pass, `cargo clippy -- -D warnings` and `cargo fmt --check` are clean, `tests/run-ert.sh` passes 37 of 37 with `--module-assertions`, `examples/run-examples.sh` passes 3 of 3. **Not verified:** the GitHub Actions workflow (Task 12), Rust 1.85, Emacs 30, macOS, and Windows.

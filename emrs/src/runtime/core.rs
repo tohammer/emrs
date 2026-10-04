@@ -64,7 +64,11 @@ pub(crate) enum Delivery {
         payload: Box<dyn Payload>,
         /// Backpressure accounting; `None` for an item that is not counted.
         stream: Option<Arc<StreamState>>,
-        /// Items of a cancelled call are discarded by `take`.
+        /// Set when the call is cancelled; `take` then discards the item.
+        /// Stopping the instance does not set it, so the items of a stream
+        /// that already finished still reach Emacs.
+        discard: Arc<AtomicBool>,
+        /// The call's token, cancelled if the item cannot be encoded.
         token: CancelToken,
     },
     End {
@@ -132,11 +136,11 @@ impl Core {
         let mut out = self.out.lock().unwrap();
         while taken.len() < max {
             let Some(delivery) = out.pop_front() else { break };
-            if let Delivery::Item { stream, token, .. } = &delivery {
+            if let Delivery::Item { stream, discard, .. } = &delivery {
                 if let Some(stream) = stream {
                     stream.release();
                 }
-                if token.is_cancelled() {
+                if discard.load(Ordering::SeqCst) {
                     continue;
                 }
             }

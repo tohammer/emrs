@@ -78,6 +78,15 @@ impl Serialize for Unencodable {
     }
 }
 
+/// A value whose serialization panics.
+struct Explosive;
+
+impl Serialize for Explosive {
+    fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+        panic!("serializer exploded")
+    }
+}
+
 #[derive(Deserialize)]
 enum Start {
     Ok,
@@ -96,6 +105,7 @@ enum ProbeRequest {
     Count { n: u32, capacity: usize },
     Endless,
     BadReply,
+    PanicReply,
     BadEvent,
     BadItem,
 }
@@ -180,6 +190,7 @@ impl Service for Probe {
                 });
             }
             ProbeRequest::BadReply => reply.ok(Unencodable),
+            ProbeRequest::PanicReply => reply.ok(Explosive),
             ProbeRequest::BadEvent => {
                 ctx.emit(ProbeEvent::Bad(Unencodable));
                 reply.ok(());

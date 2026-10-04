@@ -322,6 +322,58 @@ fn stopping_ends_open_streams_as_failed_with_kind_stopped() {
 }
 
 #[test]
+fn finished_stream_keeps_its_items_when_the_instance_stops() {
+    let mut host = host();
+    let call = host.begin_stream(Request::Count { n: 10, capacity: 64 }).unwrap();
+    std::thread::sleep(Duration::from_millis(200)); // the producer has finished; nothing is drained yet
+    assert_eq!(host.stop(), State::Stopped);
+    let result = host.finish_stream::<u32>(call);
+    assert_eq!(result.status, StreamEnd::Done);
+    assert_eq!(result.items, (0..10).collect::<Vec<u32>>());
+}
+
+/// Panics in `stop` and again when its state is dropped.
+struct Fragile {
+    armed: bool,
+}
+
+impl Drop for Fragile {
+    fn drop(&mut self) {
+        if self.armed {
+            panic!("drop exploded");
+        }
+    }
+}
+
+impl Service for Fragile {
+    const NAME: &'static str = "fragile";
+    type Args = ();
+    type Request = ();
+    type Event = ();
+
+    fn start(_: (), _: &Context<Self>) -> Result<Self, Error> {
+        Ok(Fragile { armed: false })
+    }
+
+    fn handle(&mut self, _: (), reply: Reply, _: &Context<Self>) {
+        reply.ok(());
+    }
+
+    fn stop(&mut self) {
+        self.armed = true;
+        panic!("stop exploded");
+    }
+}
+
+#[test]
+fn panic_in_stop_followed_by_panic_in_drop_does_not_abort() {
+    let mut host = Host::<Fragile>::start(());
+    assert!(host.wait_for_state(State::Running));
+    assert_eq!(host.stop(), State::Failed);
+    assert!(host.logs().iter().any(|l| l.contains("panicked while being dropped")), "{:?}", host.logs());
+}
+
+#[test]
 fn a_slow_instance_does_not_delay_another() {
     let mut slow = host();
     let mut fast = host();

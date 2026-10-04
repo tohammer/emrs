@@ -6,12 +6,13 @@ use crate::convert::ser::SerError;
 use crate::error::{Error, ErrorKind, Fail};
 use crate::ffi::env::{Env, Exit, Value};
 use crate::ffi::sys;
+use crate::payload::Payload;
 use crate::runtime::core::{Core, Delivery, StreamEnd};
 use crate::runtime::instance::{Actor, AnyActor, Mode, Service};
 use std::os::raw::{c_int, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Version of the interface between `emrs.el` and modules.
@@ -37,15 +38,41 @@ struct Module {
     name: &'static str,
     version: &'static str,
     core: Arc<Core>,
-    /// Write end of the wake-up pipe, or -1 before `attach`.
-    fd: Arc<AtomicI32>,
+    /// Write end of the wake-up pipe, or -1 while there is none. The lock is
+    /// held across every write and across swap-and-close, so a wake-up can
+    /// never write to a descriptor number that was closed and reused.
+    fd: Arc<Mutex<c_int>>,
     services: Vec<ServiceEntry>,
 }
 
-fn write_wake_byte(fd: c_int) {
-    // A failed write means the pipe is gone; emrs.el re-attaches and drains.
-    unsafe {
-        libc::write(fd, b"!".as_ptr() as *const c_void, 1);
+/// Write the wake-up byte if a pipe is attached.
+fn wake(fd: &Mutex<c_int>) {
+    let fd = fd.lock().unwrap();
+    if *fd >= 0 {
+        // A failed write means the pipe is gone; emrs.el re-attaches and drains.
+        unsafe {
+            libc::write(*fd, b"!".as_ptr() as *const c_void, 1);
+        }
+    }
+}
+
+/// Install `new` as the wake-up descriptor and close the previous one.
+fn replace_fd(fd: &Mutex<c_int>, new: c_int) {
+    let mut fd = fd.lock().unwrap();
+    let old = std::mem::replace(&mut *fd, new);
+    if old >= 0 {
+        unsafe {
+            libc::close(old);
+        }
+    }
+}
+
+/// Convert a payload, turning a panic in a user `Serialize` impl into an
+/// encode error so that it cannot take the rest of a drain with it.
+fn encode(env: &Env, payload: &dyn Payload) -> Result<Value, SerError> {
+    match catch_unwind(AssertUnwindSafe(|| payload.to_lisp(env))) {
+        Ok(result) => result,
+        Err(_) => Err(SerError::Msg("panic while encoding the value".to_string())),
     }
 }
 
@@ -164,12 +191,7 @@ fn info(env: &Env, module: &Module, _: &[Value]) -> Result<Value, Fail> {
 
 fn attach(env: &Env, module: &Module, args: &[Value]) -> Result<Value, Fail> {
     let fd = env.open_channel(args[0])?;
-    let old = module.fd.swap(fd, Ordering::SeqCst);
-    if old >= 0 {
-        unsafe {
-            libc::close(old);
-        }
-    }
+    replace_fd(&module.fd, fd);
     Ok(env.nil()?)
 }
 
@@ -223,7 +245,7 @@ fn drain(env: &Env, module: &Module, args: &[Value]) -> Result<Value, Fail> {
     let mut deliveries = module.core.take(max).into_iter().peekable();
     while let Some(delivery) = deliveries.next() {
         match delivery {
-            Delivery::Event { instance, payload } => match payload.to_lisp(env) {
+            Delivery::Event { instance, payload } => match encode(env, payload.as_ref()) {
                 Ok(value) => records.push(record(env, "event", Some(instance), None, value)?),
                 Err(SerError::Exit) => return Err(Fail::Exit),
                 Err(SerError::Msg(message)) => {
@@ -232,7 +254,7 @@ fn drain(env: &Env, module: &Module, args: &[Value]) -> Result<Value, Fail> {
                     records.push(record(env, "log", None, None, payload)?);
                 }
             },
-            Delivery::Reply { instance, call, payload } => match payload.to_lisp(env) {
+            Delivery::Reply { instance, call, payload } => match encode(env, payload.as_ref()) {
                 Ok(value) => records.push(record(env, "reply", Some(instance), Some(call), value)?),
                 Err(SerError::Exit) => return Err(Fail::Exit),
                 Err(SerError::Msg(message)) => {
@@ -243,7 +265,7 @@ fn drain(env: &Env, module: &Module, args: &[Value]) -> Result<Value, Fail> {
             Delivery::Error { instance, call, error } => {
                 records.push(record(env, "error", Some(instance), Some(call), error_plist(env, &error)?)?);
             }
-            Delivery::Item { instance, call, payload, token, .. } => {
+            Delivery::Item { instance, call, payload, token, discard, .. } => {
                 // Merge the run of items of this stream into one record.
                 let mut run = vec![payload];
                 while let Some(Delivery::Item { instance: i, call: c, .. }) = deliveries.peek() {
@@ -254,13 +276,13 @@ fn drain(env: &Env, module: &Module, args: &[Value]) -> Result<Value, Fail> {
                         run.push(payload);
                     }
                 }
-                if token.is_cancelled() {
+                if discard.load(Ordering::SeqCst) {
                     continue;
                 }
                 let mut values = Vec::with_capacity(run.len());
                 let mut failure = None;
                 for payload in run {
-                    match payload.to_lisp(env) {
+                    match encode(env, payload.as_ref()) {
                         Ok(value) => values.push(value),
                         Err(SerError::Exit) => return Err(Fail::Exit),
                         Err(SerError::Msg(message)) => {
@@ -276,6 +298,7 @@ fn drain(env: &Env, module: &Module, args: &[Value]) -> Result<Value, Fail> {
                     if let Some(actor) = module.core.get(instance) {
                         actor.shared().cancel_call(call);
                     }
+                    discard.store(true, Ordering::SeqCst);
                     token.cancel();
                     let error = Error::with_kind(ErrorKind::Encode, message);
                     let payload = env.cons(env.intern("failed")?, error_plist(env, &error)?)?;
@@ -302,6 +325,8 @@ fn drain(env: &Env, module: &Module, args: &[Value]) -> Result<Value, Fail> {
 
 fn shutdown(env: &Env, module: &Module, args: &[Value]) -> Result<Value, Fail> {
     let seconds = env.extract_float(env.call("float", &[args[0]])?)?;
+    // The wake-up descriptor stays open: if the user cancels the exit, the
+    // module must still be able to wake Emacs. The process exit closes it.
     let all_stopped = module.core.shutdown(Duration::from_secs_f64(seconds.clamp(0.0, 3600.0)));
     Ok(if all_stopped { env.t()? } else { env.nil()? })
 }
@@ -372,14 +397,9 @@ pub unsafe fn init(
     if names.windows(2).any(|pair| pair[0] == pair[1]) {
         return 3;
     }
-    let fd = Arc::new(AtomicI32::new(-1));
+    let fd = Arc::new(Mutex::new(-1));
     let wake_fd = fd.clone();
-    let core = Core::new(name, move || {
-        let fd = wake_fd.load(Ordering::SeqCst);
-        if fd >= 0 {
-            write_wake_byte(fd);
-        }
-    });
+    let core = Core::new(name, move || wake(&wake_fd));
     let module: &'static Module = Box::leak(Box::new(Module { name, version, core, fd, services }));
     let env = unsafe { Env::from_raw(raw_env) };
     match catch_unwind(AssertUnwindSafe(|| define(&env, module))) {

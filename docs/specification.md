@@ -353,6 +353,9 @@ pipe; answers come back as the Rust values the service produced.
   0.1 s, so it wakes when data arrives (see 13.3).
 - While waiting, other deliveries of the same module are dispatched: event
   handlers and other callbacks may run. This reentrancy is documented.
+- Called from inside an emrs callback, it dispatches only its own reply.
+  All other deliveries stay queued in order until that callback returns, which
+  preserves delivery order and bounds the nesting depth.
 
 ### 5.3 Errors
 
@@ -460,18 +463,31 @@ file on disk is newer than the loaded one.
   first, converts up to `MAX` deliveries, and, if the FIFO is still non-empty,
   sets the flag and writes a byte again. Emacs thus returns to its command loop
   between drains.
+- `emrs.el` calls `drain` with quitting inhibited and appends the result to a
+  per-module Lisp queue; one dispatch loop per module pops from its head. A
+  drain triggered from inside a callback only appends. A non-local exit from a
+  callback leaves the rest queued and schedules the loop to resume.
+- A panic inside a user `Serialize` impl during `drain` is caught and reported
+  as an `encode` error for that value only.
 - Consecutive queued items of one stream are merged into a single `items`
   delivery. This is the only batching mechanism; authors configure capacity
   only.
 - A stream's in-flight count rises on `send` and falls when the item is
   converted in `drain`. This implements backpressure.
+- Queued items are discarded only for a call that was cancelled (from Elisp,
+  or because one of its items could not be encoded). Stopping an instance
+  does not discard items already queued, so a stream that finished before the
+  stop is delivered completely.
 - Order is preserved across everything a module delivers, because there is a
   single FIFO.
 - A value whose conversion fails becomes an `error` delivery with kind `encode`
   (calls and streams; a stream then ends `failed`) or a `log` delivery (events).
 - If the pipe process dies, its sentinel creates a new one and calls `attach`
   again, then drains once.
-- The runtime closes the descriptor in `shutdown`.
+- The descriptor is closed when a new pipe is attached, under a lock shared
+  with the wake-up write, so a wake-up never writes to a reused descriptor
+  number. `shutdown` leaves it open: if the user cancels the exit, the module
+  must still be able to wake Emacs, and the process exit closes it anyway.
 
 ### 6.4 FFI rules
 

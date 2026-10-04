@@ -12,6 +12,7 @@ use serde::de::DeserializeOwned;
 use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 /// A message-passing service hosted in an Emacs module.
@@ -78,6 +79,8 @@ pub(crate) enum Mode {
 struct CallEntry {
     mode: Mode,
     token: CancelToken,
+    /// Shared with the call's queued items; see `Delivery::Item`.
+    discard: Arc<AtomicBool>,
 }
 
 struct Calls {
@@ -108,10 +111,11 @@ impl Shared {
             return Err(Error::with_kind(ErrorKind::Stopped, "the instance is not running"));
         }
         let token = self.token.child();
+        let discard = Arc::new(AtomicBool::new(false));
         if let Some(id) = call {
-            calls.open.insert(id, CallEntry { mode, token: token.clone() });
+            calls.open.insert(id, CallEntry { mode, token: token.clone(), discard: discard.clone() });
         }
-        Ok(Reply::new(self.clone(), call, mode, token))
+        Ok(Reply::new(self.clone(), call, mode, token, discard))
     }
 
     /// Push the deliveries that complete `call`, unless it is already
@@ -129,10 +133,12 @@ impl Shared {
         self.complete_with(call, || vec![make()]);
     }
 
-    /// Forget `call` and cancel its token. Nothing is delivered for it.
+    /// Forget `call`, discard its queued items and cancel its token. Nothing
+    /// more is delivered for it.
     pub(crate) fn cancel_call(&self, call: u64) {
         let entry = self.calls.lock().unwrap().open.remove(&call);
         if let Some(entry) = entry {
+            entry.discard.store(true, Ordering::SeqCst);
             entry.token.cancel();
         }
     }
@@ -329,11 +335,18 @@ impl<S: Service> Actor<S> {
                 }
             }
             Envelope::Stop => {
+                // The state stays outside the closure: if `stop` panics it must
+                // not be dropped during that unwind, where a second panic
+                // from its `Drop` would abort Emacs.
+                let mut state = service.take();
                 let stopped = catch_unwind(AssertUnwindSafe(|| {
-                    if let Some(mut state) = service.take() {
+                    if let Some(state) = state.as_mut() {
                         state.stop();
                     }
                 }));
+                if catch_unwind(AssertUnwindSafe(move || drop(state))).is_err() {
+                    self.shared.core.log(Level::Error, "service state panicked while being dropped");
+                }
                 match stopped {
                     Ok(()) => {
                         self.shared.terminate(State::Stopped, None);

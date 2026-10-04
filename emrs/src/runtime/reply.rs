@@ -7,6 +7,7 @@ use crate::error::{Error, ErrorKind};
 use crate::payload::Payload;
 use serde::Serialize;
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Condvar, Mutex};
 
 /// Counts the items of one stream that are queued but not yet drained.
@@ -79,12 +80,19 @@ pub struct Reply {
     call: Option<u64>,
     mode: Mode,
     token: CancelToken,
+    discard: Arc<AtomicBool>,
     done: bool,
 }
 
 impl Reply {
-    pub(crate) fn new(shared: Arc<Shared>, call: Option<u64>, mode: Mode, token: CancelToken) -> Reply {
-        Reply { shared, call, mode, token, done: false }
+    pub(crate) fn new(
+        shared: Arc<Shared>,
+        call: Option<u64>,
+        mode: Mode,
+        token: CancelToken,
+        discard: Arc<AtomicBool>,
+    ) -> Reply {
+        Reply { shared, call, mode, token, discard, done: false }
     }
 
     /// Answer with a value.
@@ -125,6 +133,7 @@ impl Reply {
             call: self.call.unwrap_or(0),
             state: StreamState::new(capacity.max(1), &self.token),
             token: self.token.clone(),
+            discard: self.discard.clone(),
             done: !live,
             _item: PhantomData,
         }
@@ -156,9 +165,10 @@ impl Reply {
         match (self.mode, outcome) {
             (Mode::Stream, Ok(payload)) => {
                 let token = self.token.clone();
+                let discard = self.discard.clone();
                 self.shared.complete_with(call, || {
                     vec![
-                        Delivery::Item { instance, call, payload, stream: None, token },
+                        Delivery::Item { instance, call, payload, stream: None, discard, token },
                         Delivery::End { instance, call, status: StreamEnd::Done, error: None },
                     ]
                 });
@@ -192,6 +202,7 @@ pub struct StreamSender<T> {
     call: u64,
     state: Arc<StreamState>,
     token: CancelToken,
+    discard: Arc<AtomicBool>,
     done: bool,
     _item: PhantomData<fn(T)>,
 }
@@ -223,6 +234,7 @@ impl<T: Serialize + Send + 'static> StreamSender<T> {
             call: self.call,
             payload: Box::new(item),
             stream: Some(self.state.clone()),
+            discard: self.discard.clone(),
             token: self.token.clone(),
         });
     }
