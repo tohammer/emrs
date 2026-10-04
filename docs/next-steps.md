@@ -5,10 +5,11 @@ architecture.md or an ADR.
 
 ## Next
 
-1. Windows crash, step 2: build the test module for `x86_64-pc-windows-gnu`
-   (which uses `msvcrt.dll`, like Emacs) in the diagnostics workflow on the
-   branch `debug/windows-crash` and rerun. Step 1 pointed at the C runtime
-   mismatch (spec section 13.1, backlog "Windows support"). Delete
+1. Windows crash, next experiment: on the branch `debug/windows-crash`,
+   write and close the wake-up descriptor through `msvcrt.dll` (resolved
+   with `GetModuleHandle`/`GetProcAddress`) instead of `libc`, and rerun the
+   diagnostics workflow. Switching to the GNU target did not help, because it
+   links UCRT as well (spec section 13.1, backlog "Windows support"). Delete
    `.github/workflows/windows-debug.yml` when the investigation ends.
 
 ## Watch out for
