@@ -5,12 +5,10 @@ architecture.md or an ADR.
 
 ## Next
 
-1. Windows crash, next experiment: on the branch `debug/windows-crash`,
-   write and close the wake-up descriptor through `msvcrt.dll` (resolved
-   with `GetModuleHandle`/`GetProcAddress`) instead of `libc`, and rerun the
-   diagnostics workflow. Switching to the GNU target did not help, because it
-   links UCRT as well (spec section 13.1, backlog "Windows support"). Delete
-   `.github/workflows/windows-debug.yml` when the investigation ends.
+1. Windows crash, permanent fix: the cause is confirmed (spec section 13.1).
+   Decide how the module finds Emacs's C runtime, record it as an ADR, turn
+   the experiment on `debug/windows-crash` into the fix, make the Windows CI
+   job required, and delete `.github/workflows/windows-debug.yml`.
 
 ## Watch out for
 
