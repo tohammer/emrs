@@ -6,6 +6,12 @@ Rust owns threads and state, Emacs owns its event loop and UI, and typed
 messages are the only boundary between them. Service code never runs on the
 Emacs thread and never sees the Emacs module API.
 
+It is meant for packages where Emacs Lisp provides the UI and the expensive
+part is parsing, searching, indexing or talking to other processes: a Git
+backend, an LSP client, grep and file scanning over large trees, a project
+index, database access. Such a service keeps its state (caches, indexes,
+connections) across calls and sends Emacs only the results it needs.
+
 Status: the core is implemented and tested on Linux and macOS with Emacs 30
 and 31. Windows works with the official Emacs build but is tested less (see
 below).
@@ -92,10 +98,6 @@ requests.
 - `docs/specs/2026-10-03-emrs-core.md`: the specification. What emrs does and
   why, including the Lisp data mapping (section 8), the module protocol
   (section 6) and open issues (section 13).
-- `docs/implementation-plan.md`: the task-by-task plan the first version was
-  built from. Its code blocks show the state before review; the repository is
-  the current source.
-- `docs/brainstorming.md`: the original brainstorming transcript.
 - `docs/architecture.md`: how the system is built now.
 - `docs/backlog.md` and `docs/next-steps.md`: open points and what comes next.
 
