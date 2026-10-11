@@ -1,5 +1,7 @@
 # emrs
 
+[![CI](https://github.com/tohammer/emrs/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/tohammer/emrs/actions/workflows/ci.yml)
+
 Write Emacs dynamic modules in Rust as message-passing services.
 
 Rust owns threads and state, Emacs owns its event loop and UI, and typed
@@ -91,7 +93,7 @@ examples/run-examples.sh   # the example modules
 
 Set `EMACS` to run the Emacs suites with another binary, for example
 `EMACS=/path/to/emacs-30 tests/run-ert.sh`. CI runs all of this on pull
-requests.
+requests and on pushes to `master`.
 
 ## Documentation
 
