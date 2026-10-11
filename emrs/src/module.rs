@@ -416,7 +416,8 @@ pub unsafe fn init(
 /// ```
 ///
 /// The module must be built as a `cdylib` with `panic = "unwind"` and
-/// installed as `git-rs-module` plus the platform's module suffix.
+/// installed as `git-rs-module` plus the platform's module suffix;
+/// `cargo emacs build` does both.
 #[macro_export]
 macro_rules! module {
     ($name:literal, [$($service:ty),+ $(,)?]) => {

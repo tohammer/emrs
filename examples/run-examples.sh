@@ -4,19 +4,8 @@
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
-cargo build -p echo-rs -p grep-rs
-out="$root/target/elisp"
-mkdir -p "$out"
-for name in echo grep; do
-    for ext in so dylib dll; do
-        for built in "target/debug/lib${name}_rs.$ext" "target/debug/${name}_rs.$ext"; do
-            if [ -f "$built" ]; then
-                cp "$built" "$out/$name-rs-module.$ext"
-            fi
-        done
-    done
-done
+cargo run -q -p cargo-emacs -- build -p echo-rs -p grep-rs
 exec "${EMACS:-emacs}" --batch --module-assertions \
-    -L "$root/elisp" -L "$out" \
+    -L "$root/elisp" -L "$root/target/emacs" \
     -l "$root/examples/examples-test.el" \
     -f ert-run-tests-batch-and-exit

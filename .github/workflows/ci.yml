@@ -24,7 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.85
-      - run: cargo check -p emrs
+      - run: cargo check -p emrs -p cargo-emacs
 
   emacs:
     name: Emacs ${{ matrix.emacs }} on ${{ matrix.os }}

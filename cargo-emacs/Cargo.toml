@@ -1,0 +1,10 @@
+[package]
+name = "cargo-emacs"
+version = "0.1.0"
+description = "Cargo subcommand that builds Emacs dynamic modules and installs them under the name Emacs loads"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde_json = "1"
