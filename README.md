@@ -103,3 +103,7 @@ requests.
 
 The Rust crates are licensed under either MIT or Apache-2.0, at your option.
 `elisp/emrs.el` is licensed under GPL-3.0-or-later.
+
+## AI Disclaimer
+
+This project was developed with the help of AI coding agents.
