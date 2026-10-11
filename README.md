@@ -98,6 +98,9 @@ requests.
 - `docs/specs/2026-10-03-emrs-core.md`: the specification. What emrs does and
   why, including the Lisp data mapping (section 8), the module protocol
   (section 6) and open issues (section 13).
+- `docs/implementation-plan.md`: the task-by-task plan the first version was
+  built from. Its code blocks show the state before review; the repository is
+  the current source.
 - `docs/architecture.md`: how the system is built now.
 - `docs/backlog.md` and `docs/next-steps.md`: open points and what comes next.
 
