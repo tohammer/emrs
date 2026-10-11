@@ -14,6 +14,7 @@ Lisp values.
 
 The project has two parts: the Rust crate `emrs` (dependencies `serde` and
 `libc` only) and the Elisp library `elisp/emrs.el` (Emacs 30.1 or later).
+The build tool `cargo-emacs` is a separate crate that modules do not link.
 Every module statically links its own copy of `emrs` and so has its own
 runtime. Modules built against different `emrs` versions coexist in one
 Emacs.
@@ -31,6 +32,7 @@ Emacs.
 | `emrs/src/module.rs` | The eight protocol functions and the `module!` macro; wraps every body in `catch_unwind` | `ffi`, `convert`, `runtime` |
 | `emrs/src/testing.rs` | Host for testing services without Emacs | `runtime` |
 | `elisp/emrs.el` | Loads modules and checks their protocol version, owns the wake-up pipe process, drains deliveries and dispatches them to callbacks; public API `emrs-send`, `emrs-call`, `emrs-call-sync`, `emrs-call-stream`, `emrs-stop` | module protocol |
+| `cargo-emacs/` | The Cargo subcommand `cargo emacs build`: runs `cargo build`, reads the library path from Cargo's JSON messages and installs it as `<name>-module` plus suffix in `target/emacs/` (ADR 0002). Not linked into modules | `cargo`, `serde_json` |
 | `tests/emrs-test-module/` | `cdylib` with round-trip and misbehaving services for the ERT suite | `emrs` |
 | `tests/elisp/`, `tests/run-ert.sh` | ERT suite, run with `--module-assertions` | test module, `emrs.el` |
 | `examples/echo`, `examples/grep` | Complete example modules with smoke tests (`examples/run-examples.sh`) | `emrs`, `emrs.el` |

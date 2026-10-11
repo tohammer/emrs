@@ -13,3 +13,6 @@ crate-type = ["cdylib"]
 emrs = { path = "../../emrs" }
 serde = { version = "1", features = ["derive"] }
 serde_bytes = "0.11"
+
+[package.metadata.emacs-module]
+name = "emrs-test"

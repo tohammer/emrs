@@ -67,17 +67,37 @@ Design notes from the original brainstorming:
 - On a load failure, report what was detected (Emacs version, platform) and
   what the artifact requires, instead of the bare loader error.
 
-## `cargo emacs` build tooling
+## `cargo emacs`: further subcommands and configuration
 
-A tool that builds a module and installs it under the name Emacs expects
-(`<name>-module` + suffix). Today this copy is a manual step (README,
-"Building a module").
+`cargo emacs build` exists (spec `docs/specs/2026-10-11-cargo-emacs-build.md`).
+Ideas from the original brainstorming that were left out: subcommands `test`,
+`package` and `release`; further keys under `[package.metadata.emacs-module]`;
+platform names such as `linux-x86_64` or a `standard` set instead of raw
+target triples; a reusable GitHub Action that builds and tests the release
+matrix (`cargo-dist` is a model); publishing the tool to crates.io. Revisit
+with the prebuilt artifacts work.
 
-Ideas from the original brainstorming, beyond that first step: subcommands
-`build`, `test`, `package` and `release`; configuration under
-`[package.metadata.emacs-module]`; platform names such as `linux-x86_64` or a
-`standard` set instead of raw target triples; a reusable GitHub Action that
-builds and tests the release matrix (`cargo-dist` is a model).
+## `cargo emacs build` does not check the module name
+
+The tool installs under the package name or the metadata key and cannot see
+the literal in `emrs::module!`; a mismatch shows up in Emacs as a failed
+`require` (ADR 0002). Origin: spec of 2026-10-11, left out to avoid
+object-file parsing. Revisit if users report confusion about it.
+
+## `cargo emacs build`: deferred review findings
+
+Origin: review of the `cargo emacs build` change (spec of 2026-10-11),
+2026-10-11. Deferred as rare and harmless; revisit on a user report.
+
+- A target directory set with `--config build.target-dir=...` is used for the
+  build but not for the default install directory, because `cargo metadata`
+  does not get the option. `--target-dir` and `CARGO_TARGET_DIR` work.
+- A run that is killed between copy and rename leaves a
+  `.<name>-module.<ext>.<pid>.tmp` file in the install directory.
+- A Cargo exit status outside 0 to 255, or a death by signal, is reported as
+  exit status 1.
+- Cargo options that print and exit (`--list`, `--version` after `build`) end
+  with the "no dynamic library" error.
 
 ## Pull-style streams and overflow policies
 

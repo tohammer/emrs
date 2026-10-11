@@ -20,6 +20,7 @@ below).
 
 - `emrs/` is the Rust crate.
 - `elisp/emrs.el` is the companion Elisp library (Emacs 30.1 or later).
+- `cargo-emacs/` is the build tool `cargo emacs build`.
 - `examples/` holds two complete modules: `echo` and a streaming `grep`.
 - `docs/specs/2026-10-03-emrs-core.md` is the full specification.
 
@@ -64,11 +65,38 @@ emrs::module!("echo-rs", [Echo]);
 
 ## Building a module
 
-1. Make the crate a `cdylib` and keep `panic = "unwind"` (the default).
-2. `cargo build --release`.
-3. Copy the library to a directory on `load-path` under the name
-   `<module>-module` plus Emacs's `module-file-suffix`, for example
-   `target/release/libecho_rs.so` to `echo-rs-module.so`.
+Make the crate a `cdylib` and keep `panic = "unwind"` (the default). Emacs
+loads a module from the file `<module>-module` plus its `module-file-suffix`
+on `load-path`, where `<module>` is the name given to `emrs::module!`.
+
+`cargo emacs build` builds the crate and installs the library under that
+name. Install the tool once:
+
+```sh
+cargo install --git https://github.com/tohammer/emrs cargo-emacs
+```
+
+Then, in the module crate:
+
+```sh
+cargo emacs build --release   # prints target/emacs/echo-rs-module.so
+```
+
+- The library goes to `emacs/` in the target directory; `--dir <path>`
+  chooses another directory. Add that directory to `load-path`.
+- All other options are passed to `cargo build`, for example `--release`,
+  `-p <package>` or `--target <triple>`. Without `--release` the build is a
+  debug build.
+- The tool takes the module name from the package name. If the name in
+  `emrs::module!` differs, state it in `Cargo.toml`:
+
+  ```toml
+  [package.metadata.emacs-module]
+  name = "echo-rs"
+  ```
+
+Without the tool, run `cargo build --release` and copy the library yourself,
+for example `target/release/libecho_rs.so` to `echo-rs-module.so`.
 
 Emacs cannot unload a module; restart Emacs to load a new build.
 
