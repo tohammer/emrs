@@ -214,7 +214,15 @@ fn spawned_task_panic_is_logged_and_the_instance_survives() {
     let mut host = host();
     assert_eq!(host.call::<()>(Request::SpawnPanic).unwrap_err().kind(), ErrorKind::NoReply);
     assert_eq!(host.call::<String>(Request::Echo("alive".into())).unwrap(), "alive");
-    assert!(host.logs().iter().any(|l| l.contains("spawned task panicked: task exploded")), "{:?}", host.logs());
+    // The reply is dropped while the task unwinds, so `no-reply` can arrive
+    // before the log line is queued.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let logged =
+        |host: &mut Host<Probe>| host.logs().iter().any(|l| l.contains("spawned task panicked: task exploded"));
+    while !logged(&mut host) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(logged(&mut host), "{:?}", host.logs());
 }
 
 #[test]
