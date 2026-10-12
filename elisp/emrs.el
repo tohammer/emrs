@@ -252,19 +252,49 @@ order and bounds the nesting depth."
         (run-at-time 0 nil #'emrs--drain m)))))
 
 (defun emrs--dispatch-own (m call)
-  "Dispatch the queued completion of CALL in module M ahead of its turn.
-Used by `emrs-call-sync' when it runs inside a callback, where the
+  "Dispatch the queued deliveries of CALL in module M ahead of their turn.
+Used by the synchronous calls when they run inside a callback, where the
 dispatch loop is suspended."
-  (let* ((instance-id (emrs-instance-id (emrs-call-instance call)))
-         (call-id (emrs-call-id call))
-         (own (cl-find-if (lambda (delivery)
-                            (and (memq (aref delivery 0) '(reply error))
-                                 (eql (aref delivery 1) instance-id)
-                                 (eql (aref delivery 2) call-id)))
-                          (emrs--module-pending m))))
+  (let ((instance-id (emrs-instance-id (emrs-call-instance call)))
+        (call-id (emrs-call-id call))
+        (own nil) (rest nil))
+    (dolist (delivery (emrs--module-pending m))
+      (if (and (memq (aref delivery 0) '(reply error items end))
+               (eql (aref delivery 1) instance-id)
+               (eql (aref delivery 2) call-id))
+          (push delivery own)
+        (push delivery rest)))
     (when own
-      (setf (emrs--module-pending m) (delq own (emrs--module-pending m)))
-      (emrs--dispatch m own))))
+      (setf (emrs--module-pending m) (nreverse rest))
+      (dolist (delivery (nreverse own))
+        (emrs--dispatch m delivery)))))
+
+(defun emrs--wait (call timeout finished-p message)
+  "Wait until FINISHED-P returns non-nil, which the callbacks of CALL cause.
+With TIMEOUT (seconds), signal `emrs-error' of kind `timeout' with
+MESSAGE after that long.  On that and on any other non-local exit, such
+as a quit, remove the callbacks of CALL and cancel it."
+  (let ((m (emrs-instance-module (emrs-call-instance call)))
+        (deadline (and timeout (+ (float-time) timeout)))
+        (returned nil))
+    (unwind-protect
+        (progn
+          (while (not (funcall finished-p))
+            (emrs--drain m)
+            (when (and (not (funcall finished-p)) (emrs--module-dispatching m))
+              (emrs--dispatch-own m call))
+            (unless (funcall finished-p)
+              (let ((remaining (and deadline (- deadline (float-time)))))
+                (when (and remaining (<= remaining 0))
+                  (emrs--signal (emrs--err 'timeout message)))
+                (accept-process-output (emrs--module-pipe m)
+                                       (if remaining (min remaining 0.1) 0.1)))))
+          (setq returned t))
+      (unless returned
+        (setf (emrs-call-callback call) nil
+              (emrs-call-on-batch call) nil
+              (emrs-call-on-end call) nil)
+        (emrs-cancel call)))))
 
 ;;;; Public API
 
@@ -345,33 +375,39 @@ event handlers and other callbacks may run.  The exception is a call
 made from inside an emrs callback: there, only this call's reply is
 dispatched and everything else waits, in order, until that callback
 returns."
-  (let* ((m (emrs-instance-module instance))
-         (deadline (and timeout (+ (float-time) timeout)))
-         (finished nil) (reply nil) (failure nil)
+  (let* ((finished nil) (reply nil) (failure nil)
          (call (emrs-call instance request
                           (lambda (value err)
                             (setq reply value failure err finished t)))))
-    (unwind-protect
-        (while (not finished)
-          (emrs--drain m)
-          (when (and (not finished) (emrs--module-dispatching m))
-            (emrs--dispatch-own m call))
-          (unless finished
-            (let ((remaining (and deadline (- deadline (float-time)))))
-              (if (and remaining (<= remaining 0))
-                  (progn
-                    (setf (emrs-call-callback call) nil)
-                    (emrs-cancel call)
-                    (setq failure (emrs--err 'timeout "No reply within the timeout")
-                          finished t))
-                (accept-process-output (emrs--module-pipe m)
-                                       (if remaining (min remaining 0.1) 0.1))))))
-      ;; Reached with FINISHED nil only on a non-local exit such as a quit.
-      (unless finished
-        (setf (emrs-call-callback call) nil)
-        (emrs-cancel call)))
+    (emrs--wait call timeout (lambda () finished) "No reply within the timeout")
     (when failure (emrs--signal failure))
     reply))
+
+(defun emrs-call-stream-sync (instance request &optional timeout)
+  "Send REQUEST to INSTANCE, wait for its stream to end and return the items.
+The items of all batches are returned as one list, in order.  Signal
+`emrs-error' with data (KIND MESSAGE DATA) when the stream fails or is
+cancelled by the service; the items received until then are dropped.
+With TIMEOUT (seconds), give up after that long with kind `timeout';
+otherwise wait until the stream ends.  \\[keyboard-quit] cancels the call.
+
+The wait is on the module only, so the filters of other processes do
+not run.  Deliveries of the same module are dispatched as described for
+`emrs-call-sync', including the exception inside an emrs callback."
+  (let* ((batches nil) (status nil) (failure nil)
+         (call (emrs-call-stream instance request
+                                 :on-batch (lambda (items) (push items batches))
+                                 :on-end (lambda (end err)
+                                           (setq status end failure err)))))
+    (emrs--wait call timeout (lambda () status) "The stream did not end within the timeout")
+    (pcase status
+      ('done (let ((items nil))
+               ;; BATCHES is newest first.
+               (dolist (batch batches)
+                 (setq items (nconc batch items)))
+               items))
+      ('cancelled (emrs--signal (emrs--err 'cancelled "The stream was cancelled")))
+      (_ (emrs--signal (or failure (emrs--err 'failed "The stream failed")))))))
 
 (defun emrs-stop (instance)
   "Stop INSTANCE.  Return at once; ON-EXIT runs when it has stopped."

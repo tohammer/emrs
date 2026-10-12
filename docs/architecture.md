@@ -31,7 +31,7 @@ Emacs.
 | `emrs/src/crt.rs` | Writes and closes the wake-up descriptor in the C runtime that owns it; on Windows reads it from the import table of `emacs.exe` (ADR 0001) | `libc`, Windows `kernel32` |
 | `emrs/src/module.rs` | The eight protocol functions and the `module!` macro; wraps every body in `catch_unwind` | `ffi`, `convert`, `runtime` |
 | `emrs/src/testing.rs` | Host for testing services without Emacs | `runtime` |
-| `elisp/emrs.el` | Loads modules and checks their protocol version, owns the wake-up pipe process, drains deliveries and dispatches them to callbacks; public API `emrs-send`, `emrs-call`, `emrs-call-sync`, `emrs-call-stream`, `emrs-stop` | module protocol |
+| `elisp/emrs.el` | Loads modules and checks their protocol version, owns the wake-up pipe process, drains deliveries and dispatches them to callbacks; public API `emrs-send`, `emrs-call`, `emrs-call-sync`, `emrs-call-stream`, `emrs-call-stream-sync`, `emrs-stop` | module protocol |
 | `cargo-emacs/` | The Cargo subcommand `cargo emacs build`: runs `cargo build`, reads the library path from Cargo's JSON messages and installs it as `<name>-module` plus suffix in `target/emacs/` (ADR 0002). Not linked into modules | `cargo`, `serde_json` |
 | `tests/emrs-test-module/` | `cdylib` with round-trip and misbehaving services for the ERT suite | `emrs` |
 | `tests/elisp/`, `tests/run-ert.sh` | ERT suite, run with `--module-assertions` | test module, `emrs.el` |
