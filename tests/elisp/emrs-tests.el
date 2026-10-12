@@ -431,6 +431,67 @@ SPEC is (VAR SERVICE ARGS &rest KEYS) as for `emrs-start'."
       (should (equal batches '((1))))
       (should (equal ends '((failed encode)))))))
 
+;;;; Synchronous streams
+
+(ert-deftest emrs-test-stream-sync-returns-all-items-in-order ()
+  (emrs-test--with-instance (inst "probe" :ok)
+    (should (equal (emrs-call-stream-sync inst '(:count :n 5000 :capacity 8) 20)
+                   (number-sequence 0 4999)))
+    (should (equal (emrs-call-stream-sync inst '(:count :n 0 :capacity 8) 5) nil))
+    (should (equal (emrs-call-stream-sync inst '(:echo "one") 5) '("one")))
+    (should (= 0 (hash-table-count (emrs-instance-calls inst))))))
+
+(ert-deftest emrs-test-stream-sync-signals-a-failed-stream ()
+  (emrs-test--with-instance (inst "probe" :ok)
+    (should (eq (car (emrs-test--error (lambda () (emrs-call-stream-sync inst '(:bad-item) 5))))
+                'encode))
+    (should (equal (seq-take (emrs-test--error (lambda () (emrs-call-stream-sync inst '(:fail) 5))) 2)
+                   '(service "nope")))
+    (should (equal (emrs-call-stream-sync inst '(:count :n 3 :capacity 8) 5) '(0 1 2)))))
+
+(ert-deftest emrs-test-stream-sync-timeout-cancels-the-stream ()
+  (let ((events nil))
+    (emrs-test--with-instance (inst "probe" :ok :on-event (lambda (_i e) (push e events)))
+      (let ((start (float-time)))
+        (should (eq (car (emrs-test--error (lambda () (emrs-call-stream-sync inst '(:endless) 0.2))))
+                    'timeout))
+        (should (< (- (float-time) start) 1.0)))
+      (should (= 0 (hash-table-count (emrs-instance-calls inst))))
+      (should (emrs-test--wait (lambda () (member '(:producer-stopped) events)))))))
+
+(ert-deftest emrs-test-stream-sync-quit-cancels-the-stream ()
+  (let ((events nil))
+    (emrs-test--with-instance (inst "probe" :ok :on-event (lambda (_i e) (push e events)))
+      (let ((timer (run-at-time 0.1 nil (lambda () (signal 'quit nil)))))
+        (unwind-protect
+            (should (eq (condition-case nil
+                            (emrs-call-stream-sync inst '(:endless))
+                          (quit 'quit))
+                        'quit))
+          (cancel-timer timer)))
+      (should (= 0 (hash-table-count (emrs-instance-calls inst))))
+      (should (emrs-test--wait (lambda () (member '(:producer-stopped) events)))))))
+
+(ert-deftest emrs-test-stream-sync-inside-a-callback ()
+  (emrs-test--with-instance (inst "probe" :ok)
+    (let ((result nil) (order nil))
+      (emrs-call inst '(:echo "outer")
+                 (lambda (_reply _err)
+                   (emrs-call inst '(:echo "later") (lambda (&rest _) (push 'later order)))
+                   (setq result (emrs-call-stream-sync inst '(:count :n 3000 :capacity 8) 20))
+                   (push 'stream order)))
+      (should (emrs-test--wait (lambda () (memq 'later order)) 20))
+      (should (equal result (number-sequence 0 2999)))
+      (should (equal order '(later stream))))))
+
+(ert-deftest emrs-test-stream-sync-instance-stops-while-waiting ()
+  (emrs-test--with-instance (inst "probe" :ok)
+    (let ((timer (run-at-time 0.1 nil #'emrs-stop inst)))
+      (unwind-protect
+          (should (eq (car (emrs-test--error (lambda () (emrs-call-stream-sync inst '(:endless) 5))))
+                      'stopped))
+        (cancel-timer timer)))))
+
 ;;;; Lifecycle
 
 (ert-deftest emrs-test-stop ()
