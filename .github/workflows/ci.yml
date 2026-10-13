@@ -41,6 +41,16 @@ jobs:
         with:
           version: ${{ matrix.emacs }}
       - run: tests/run-ert.sh
+      # Temporary: per-step timing of emrs--wait, see tests/elisp/emrs-diag-wait.el.
+      - name: Diagnose the synchronous wait
+        if: always()
+        run: |
+          for i in 1 2 3; do
+            emacs --batch --module-assertions -L elisp -L target/emacs \
+              -l tests/elisp/emrs-tests.el -l tests/elisp/emrs-diag-wait.el \
+              -f ert-run-tests-batch-and-exit 2>&1 \
+              | grep -E "DIAG|FAILED|^Ran " || true
+          done
       - run: examples/run-examples.sh
 
   macos-x86_64-build:
