@@ -134,6 +134,12 @@ requests and on pushes to `master`.
 - `docs/architecture.md`: how the system is built now.
 - `docs/backlog.md` and `docs/next-steps.md`: open points and what comes next.
 
+## Projects using emrs
+
+- [emacs-quarry](https://github.com/tohammer/emrs-quarry): a fast project
+  file finder and an interactive grep for Emacs, both backed by one Rust
+  module.
+
 ## Licence
 
 The Rust crates are licensed under either MIT or Apache-2.0, at your option.
