@@ -64,6 +64,12 @@ Emacs.
   deliveries to Lisp values. If the FIFO is still not empty, `drain` re-arms
   the wake-up so that Emacs returns to its command loop between batches.
   Consecutive items of one stream are merged into a single `items` delivery.
+- **Synchronous wait.** `emrs-call-sync` and `emrs-call-stream-sync` loop
+  over drain, check and `accept-process-output` on the module's pipe only
+  (JUST-THIS-ONE `t`), in slices of at most 0.1 s. The filters of other
+  processes do not run; timers do. During that call the pipe filter records
+  the wake-up and does not drain, so every wake-up returns control to the
+  loop, which tests completion and the deadline (ADR 0003).
 - **Backpressure.** Each stream has a capacity. `send` blocks the producer
   once that many items are in flight, and an item stops counting when `drain`
   converts it. Emacs → Rust queues are unbounded.
@@ -76,6 +82,11 @@ Emacs.
 
 ## Lessons
 
+- `accept-process-output` with a process argument keeps reading that process
+  for as long as output keeps arriving, whatever its timeout. A filter that
+  drains makes the module produce the next wake-up, so one call asked for
+  0.1 s lasted up to 1.6 s on the CI runners and timeouts of the synchronous
+  calls overshot by seconds (ADR 0003).
 - Before Emacs 31, `process-adaptive-read-buffering` delays reading after
   one-byte reads by up to 50 ms. That would throttle every stream, so the
   wake-up pipe is created with the option bound to nil.

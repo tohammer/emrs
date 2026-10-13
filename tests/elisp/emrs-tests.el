@@ -147,6 +147,34 @@ SPEC is (VAR SERVICE ARGS &rest KEYS) as for `emrs-start'."
       (should (< (- (float-time) start) 1.0))
       (should (= 0 (hash-table-count (emrs-instance-calls inst)))))))
 
+(ert-deftest emrs-test-call-sync-does-not-run-other-filters ()
+  (emrs-test--with-instance (inst "probe" :ok)
+    (let* ((output nil) (ticks 0)
+           (other (make-process :name "emrs-test-other" :noquery t
+                                :command '("sh" "-c" "echo hi; sleep 5")
+                                :connection-type 'pipe
+                                :filter (lambda (_p string) (push string output))))
+           (timer (run-at-time 0.05 0.05 (lambda () (cl-incf ticks)))))
+      (unwind-protect
+          (progn
+            (should (= (emrs-call-sync inst '(:slow 500) 5) 500))
+            (should-not output)
+            (should (> ticks 0))
+            (should (emrs-test--wait (lambda () output))))
+        (cancel-timer timer)
+        (delete-process other)))))
+
+;; The module has one queue for all instances, so the reply of one instance
+;; is queued between the events of another.
+(ert-deftest emrs-test-call-sync-returns-during-an-event-flood ()
+  (let ((count 0) (emrs-drain-max 10))
+    (emrs-test--with-instance (flood "probe" :ok :on-event (lambda (_i _e) (cl-incf count)))
+      (emrs-test--with-instance (inst "probe" :ok)
+        (emrs-send flood '(:emit 200000))
+        (should (equal (emrs-call-sync inst '(:echo "x") 30) "x"))
+        (should (< count 200000))
+        (should (emrs-test--wait (lambda () (= count 200000)) 60))))))
+
 (ert-deftest emrs-test-cancel-call ()
   (emrs-test--with-instance (inst "probe" :ok)
     (let* ((results nil)

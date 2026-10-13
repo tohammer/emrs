@@ -52,7 +52,9 @@ keeps Emacs more responsive under load at some cost in throughput."
   ;; Deliveries fetched from the module and not yet dispatched, oldest first.
   pending
   ;; Non-nil while the dispatch loop of this module is running.
-  dispatching)
+  dispatching
+  ;; Non-nil when the pipe filter read a wake-up without draining.
+  woken)
 
 (cl-defstruct (emrs-instance (:constructor emrs--make-instance) (:copier nil))
   "A running service instance.  Create with `emrs-start'."
@@ -63,6 +65,9 @@ keeps Emacs more responsive under load at some cost in throughput."
 (cl-defstruct (emrs-call (:constructor emrs--make-call) (:copier nil))
   "An open call or stream.  Pass it to `emrs-cancel'."
   instance id mode callback on-batch on-end done)
+
+(defvar emrs--waiting nil
+  "The module whose pipe a synchronous wait is reading right now, or nil.")
 
 (defvar emrs--modules (make-hash-table :test 'eq)
   "Loaded modules by name symbol.")
@@ -122,7 +127,11 @@ WHAT names the callback for the message."
                 :buffer nil
                 :noquery t
                 :coding 'binary
-                :filter (lambda (_process _string) (emrs--drain m))
+                ;; A synchronous wait drains by itself; see `emrs--wait'.
+                :filter (lambda (_process _string)
+                          (if (eq emrs--waiting m)
+                              (setf (emrs--module-woken m) t)
+                            (emrs--drain m)))
                 :sentinel (lambda (process _event)
                             (when (and (not (process-live-p process))
                                        (eq process (emrs--module-pipe m)))
@@ -232,6 +241,7 @@ Keys: :protocol :emrs :module :version :services :target."
 Quitting is inhibited: the module has already removed these deliveries
 from its own queue, so a quit during the conversion would lose them."
   (let ((new (let ((inhibit-quit t))
+               (setf (emrs--module-woken m) nil)
                (funcall (emrs--fn (emrs--module-name m) 'drain) emrs-drain-max))))
     (setf (emrs--module-pending m) (nconc (emrs--module-pending m) new))))
 
@@ -273,28 +283,41 @@ dispatch loop is suspended."
   "Wait until FINISHED-P returns non-nil, which the callbacks of CALL cause.
 With TIMEOUT (seconds), signal `emrs-error' of kind `timeout' with
 MESSAGE after that long.  On that and on any other non-local exit, such
-as a quit, remove the callbacks of CALL and cancel it."
+as a quit, remove the callbacks of CALL and cancel it.
+
+Only the pipe of the module is read, so the filters of other processes
+do not run; timers do.  The pipe filter does not drain meanwhile.  If
+it did, `accept-process-output' would keep reading for as long as the
+module refills its queue, and neither FINISHED-P nor the deadline would
+be checked until the module pauses."
   (let ((m (emrs-instance-module (emrs-call-instance call)))
         (deadline (and timeout (+ (float-time) timeout)))
         (returned nil))
     (unwind-protect
         (progn
-          (while (not (funcall finished-p))
-            (emrs--drain m)
-            (when (and (not (funcall finished-p)) (emrs--module-dispatching m))
-              (emrs--dispatch-own m call))
-            (unless (funcall finished-p)
-              (let ((remaining (and deadline (- deadline (float-time)))))
-                (when (and remaining (<= remaining 0))
-                  (emrs--signal (emrs--err 'timeout message)))
+          ;; Every turn drains before it tests FINISHED-P: the pipe filter
+          ;; may have read a wake-up byte without draining.
+          (while (progn
+                   (emrs--drain m)
+                   (when (and (not (funcall finished-p)) (emrs--module-dispatching m))
+                     (emrs--dispatch-own m call))
+                   (not (funcall finished-p)))
+            (let ((remaining (and deadline (- deadline (float-time)))))
+              (when (and remaining (<= remaining 0))
+                (emrs--signal (emrs--err 'timeout message)))
+              (let ((emrs--waiting m))
                 (accept-process-output (emrs--module-pipe m)
-                                       (if remaining (min remaining 0.1) 0.1)))))
+                                       (if remaining (min remaining 0.1) 0.1)
+                                       nil t))))
           (setq returned t))
       (unless returned
         (setf (emrs-call-callback call) nil
               (emrs-call-on-batch call) nil
               (emrs-call-on-end call) nil)
-        (emrs-cancel call)))))
+        (emrs-cancel call)
+        ;; A quit can leave a wake-up read but not drained.
+        (when (emrs--module-woken m)
+          (run-at-time 0 nil #'emrs--drain m))))))
 
 ;;;; Public API
 
@@ -370,11 +393,12 @@ Signal `emrs-error' with data (KIND MESSAGE DATA) on failure.  With
 TIMEOUT (seconds), give up after that long with kind `timeout';
 otherwise wait until the reply arrives.  \\[keyboard-quit] cancels the call.
 
-While waiting, other deliveries of the same module are dispatched, so
-event handlers and other callbacks may run.  The exception is a call
-made from inside an emrs callback: there, only this call's reply is
-dispatched and everything else waits, in order, until that callback
-returns."
+The wait is on the module only, so the filters of other processes do
+not run; timers do.  While waiting, other deliveries of the same module
+are dispatched, so event handlers and other callbacks may run.  The
+exception is a call made from inside an emrs callback: there, only this
+call's reply is dispatched and everything else waits, in order, until
+that callback returns."
   (let* ((finished nil) (reply nil) (failure nil)
          (call (emrs-call instance request
                           (lambda (value err)
@@ -391,9 +415,9 @@ cancelled by the service; the items received until then are dropped.
 With TIMEOUT (seconds), give up after that long with kind `timeout';
 otherwise wait until the stream ends.  \\[keyboard-quit] cancels the call.
 
-The wait is on the module only, so the filters of other processes do
-not run.  Deliveries of the same module are dispatched as described for
-`emrs-call-sync', including the exception inside an emrs callback."
+The wait is on the module only, as described for `emrs-call-sync', and
+deliveries of the same module are dispatched in the same way, including
+the exception inside an emrs callback."
   (let* ((batches nil) (status nil) (failure nil)
          (call (emrs-call-stream instance request
                                  :on-batch (lambda (items) (push items batches))
