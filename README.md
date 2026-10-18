@@ -20,7 +20,9 @@ below).
 
 - `emrs/` is the Rust crate.
 - `elisp/emrs.el` is the companion Elisp library (Emacs 30.1 or later).
-- `cargo-emacs/` is the build tool `cargo emacs build`.
+- `cargo-emacs/` is the build tool (`cargo emacs build`, `cargo emacs package`).
+- `.github/workflows/module-release.yml` is a reusable workflow that
+  publishes prebuilt modules.
 - `examples/` holds two complete modules: `echo` and a streaming `grep`.
 - `docs/specs/2026-10-03-emrs-core.md` is the full specification.
 
@@ -100,6 +102,105 @@ for example `target/release/libecho_rs.so` to `echo-rs-module.so`.
 
 Emacs cannot unload a module; restart Emacs to load a new build.
 
+## Releasing prebuilt modules
+
+Users of a package should not need a Rust toolchain. emrs defines a layout
+for prebuilt modules on a release and a reusable GitHub workflow that
+produces it. An installer in Emacs that downloads these files is planned
+(`docs/next-steps.md`); until then users can download a file by hand and
+rename it to `<name>-module.<ext>`.
+
+A release of a module is the release tagged `v<version>`, where `<version>`
+is the `version` in the module's `Cargo.toml`. It holds one file per
+platform and a checksum file (macOS x86_64 is not among them, ADR 0007;
+Intel Macs build the module locally):
+
+```text
+<name>-module-linux-x86_64.so
+<name>-module-linux-aarch64.so
+<name>-module-macos-aarch64.dylib
+<name>-module-windows-x86_64.dll
+SHA256SUMS
+```
+
+`SHA256SUMS` has the format of `sha256sum`. Linux files are built against
+glibc 2.28 and load on Debian 10, RHEL 8, Ubuntu 18.10 and later.
+
+After a release, set the crate version to the next development version
+(for example `1.3.0-dev`). An installer downloads the release that matches
+the version exactly, so users who follow the default branch would otherwise
+get the binary of the previous release for newer Elisp.
+
+### `cargo emacs package`
+
+```sh
+cargo emacs package                 # target/emacs/dist/echo-rs-module-linux-x86_64.so
+cargo emacs package --target aarch64-apple-darwin
+```
+
+- It builds a release build (it adds `--release` unless `--release`,
+  `-r` or `--profile` is given) and writes `<name>-module-<platform>.<ext>` to
+  `emacs/dist/` in the target directory, or to `--dir <path>`.
+- The platform comes from `--target`, or from the host if there is none.
+  `--platform <name>` sets it for other targets.
+- `--zigbuild` runs `cargo zigbuild` instead of `cargo build`, for example
+  `cargo emacs package --zigbuild --target x86_64-unknown-linux-gnu.2.28`.
+- It does not write `SHA256SUMS`. For a release by hand, run
+  `sha256sum -- *-module-* > SHA256SUMS` in the output directory.
+
+### The release workflow
+
+Add `.github/workflows/release.yml` to the module's repository:
+
+```yaml
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    uses: tohammer/emrs/.github/workflows/module-release.yml@master
+    with:
+      package: echo-rs
+      publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
+```
+
+Pushing the tag `v<version>` builds every platform, tests each file in Emacs
+with `--module-assertions` and uploads the files and `SHA256SUMS` to the
+release. If the release does not exist, it is created as a draft, filled and
+then published, as a prerelease if the version contains `-`; a release you
+created beforehand, draft or not, is kept as it is. A run started by hand
+builds and tests without publishing.
+
+Only the publish job gets the write token; the jobs that build and test run
+with read access. Pin the workflow and `cargo-emacs` to the same emrs
+commit (`module-release.yml@<commit>` and `cargo-emacs: <commit>`) if the
+release must not change with emrs's `master`. A `rust-toolchain.toml` in the
+module's repository overrides `rust-toolchain`; it must then list the
+targets of the platforms built.
+
+| Input | Default | Meaning |
+|---|---|---|
+| `package` | `""` | Cargo package of the module; empty for the package in `working-directory` |
+| `working-directory` | `"."` | Where Cargo runs |
+| `platforms` | all four | JSON array, for example `'["linux-x86_64", "macos-aarch64"]'` |
+| `emacs-versions` | `'["30.1", "31.1"]'` | Emacs versions for the tests on Linux and macOS; Windows uses 30.1 |
+| `test-command` | `""` | Bash command run after the smoke test for each file |
+| `publish` | `false` | Upload to the release of the tag; the tag must be `v<version>` |
+| `cargo-emacs` | `master` | Branch, tag or full commit hash of emrs to install `cargo-emacs` from, or `path:<dir>` |
+| `rust-toolchain` | `stable` | Rust toolchain for builds and tests |
+
+Each test first loads the file and checks that the module reports its name
+and version. A `test-command` then runs in `working-directory` with the Rust
+toolchain installed and these variables set: `EMRS_MODULE_FILE` (the file,
+renamed to `<name>-module.<ext>`), `EMRS_MODULE_DIR` (its directory, for
+`load-path`), `EMRS_MODULE_NAME`, `EMRS_MODULE_VERSION`, and `EMRS_EL_DIR`
+(the directory of the `emrs.el` that belongs to the emrs version the module
+depends on). The command must not rebuild the module.
+
 ## Platform support
 
 | Platform | Status |
@@ -121,7 +222,11 @@ examples/run-examples.sh   # the example modules
 
 Set `EMACS` to run the Emacs suites with another binary, for example
 `EMACS=/path/to/emacs-30 tests/run-ert.sh`. CI runs all of this on pull
-requests and on pushes to `master`.
+requests and on pushes to `master`. When `cargo-emacs`, `emrs`,
+`elisp`, `examples/echo`, the workspace's `Cargo.toml` or `Cargo.lock`, or
+`.github/workflows/module-release.yml` or `release-check.yml` change, the
+workflow "Release check" also runs the release workflow on `echo` for all
+four platforms, without publishing; it can also be started by hand.
 
 ## Documentation
 
@@ -131,6 +236,9 @@ requests and on pushes to `master`.
 - `docs/implementation-plan.md`: the task-by-task plan the first version was
   built from. Its code blocks show the state before review; the repository is
   the current source.
+- `docs/specs/`: the specifications of later features, such as
+  `cargo emacs build` and the release pipeline.
+- `docs/decisions/`: the decisions behind them (ADRs).
 - `docs/architecture.md`: how the system is built now.
 - `docs/backlog.md` and `docs/next-steps.md`: open points and what comes next.
 

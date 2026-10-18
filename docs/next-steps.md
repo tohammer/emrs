@@ -5,7 +5,10 @@ architecture.md or an ADR.
 
 ## Next
 
-Nothing scheduled. Pick from `docs/backlog.md`.
+Spec for the installer `emrs-install.el` (backlog "Installer for prebuilt
+modules"), the consuming half of the release pipeline. The decisions of ADR
+0006 are settled; test it against the assets of a real release made with
+`module-release.yml`.
 
 ## Watch out for
 
@@ -14,6 +17,9 @@ Nothing scheduled. Pick from `docs/backlog.md`.
   (PR #2).
 - `docs/implementation-plan.md` shows the code before review. The repository
   is the current source.
+- Module repositories call `module-release.yml@master`, so a change to its
+  inputs or to the asset layout of ADR 0004 breaks them. Change both only
+  in a compatible way, or with a new ADR and a note in the README.
 - A change to the protocol functions or delivery shapes must bump the
   protocol integer and keep the older code path in `emrs.el` (spec section
   6.2).

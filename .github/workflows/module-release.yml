@@ -1,0 +1,309 @@
+# Reusable workflow: build an emrs module for every platform, test each
+# binary in Emacs and attach the binaries and SHA256SUMS to the release of the
+# tag v<version>. The asset contract is in docs/decisions/0004; the design in
+# docs/specs/2026-10-17-release-pipeline.md.
+#
+# The caller grants `contents: write` when `publish` is true. Only the publish
+# job keeps it; the jobs that build and run the module's code get a read-only
+# token, and no checkout keeps credentials.
+
+name: Module release
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: Cargo package of the module (passed as -p); empty for the package in working-directory
+        type: string
+        default: ""
+      working-directory:
+        description: Directory of the caller's repository where Cargo runs
+        type: string
+        default: "."
+      platforms:
+        description: JSON array of the platforms to build, test and publish
+        type: string
+        default: '["linux-x86_64", "linux-aarch64", "macos-aarch64", "windows-x86_64"]'
+      emacs-versions:
+        description: JSON array of Emacs versions for the tests on Linux and macOS (Windows uses 30.1)
+        type: string
+        default: '["30.1", "31.1"]'
+      test-command:
+        description: Bash command that tests one asset, run after the smoke test
+        type: string
+        default: ""
+      publish:
+        description: Upload to the GitHub release of the tag v<version>
+        type: boolean
+        default: false
+      cargo-emacs:
+        description: "Where cargo-emacs comes from: a branch, tag or commit of tohammer/emrs, or path:<dir> in the caller's checkout"
+        type: string
+        default: master
+      rust-toolchain:
+        description: Rust toolchain for the builds and the test jobs
+        type: string
+        default: stable
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build-matrix: ${{ steps.matrix.outputs.build }}
+      test-matrix: ${{ steps.matrix.outputs.test }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+      - name: Read the module version
+        id: version
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PACKAGE: ${{ inputs.package }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          metadata=$(cargo metadata --format-version 1 --no-deps)
+          if [ -n "$PACKAGE" ]; then
+            version=$(jq -r --arg p "$PACKAGE" '[.packages[] | select(.name == $p)][0].version // empty' <<<"$metadata")
+          else
+            version=$(jq -r --arg m "$PWD/Cargo.toml" '[.packages[] | select(.manifest_path == $m)][0].version // empty' <<<"$metadata")
+          fi
+          if [ -z "$version" ]; then
+            echo "::error::no package ${PACKAGE:-in $PWD} found; set the input package"
+            exit 1
+          fi
+          if [ "$PUBLISH" = true ] && [ "$GITHUB_REF" != "refs/tags/v$version" ]; then
+            echo "::error::publishing needs the tag v$version (the crate version), but the ref is $GITHUB_REF"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Compute the matrices
+        id: matrix
+        env:
+          PLATFORMS: ${{ inputs.platforms }}
+          EMACS_VERSIONS: ${{ inputs.emacs-versions }}
+        run: |
+          table='{
+            "linux-x86_64":   {"target": "x86_64-unknown-linux-gnu",  "zigbuild": true,  "build-runner": "ubuntu-latest",  "test-runner": "ubuntu-latest"},
+            "linux-aarch64":  {"target": "aarch64-unknown-linux-gnu", "zigbuild": true,  "build-runner": "ubuntu-latest",  "test-runner": "ubuntu-24.04-arm"},
+            "macos-aarch64":  {"target": "aarch64-apple-darwin",      "zigbuild": false, "build-runner": "macos-latest",   "test-runner": "macos-latest"},
+            "windows-x86_64": {"target": "x86_64-pc-windows-msvc",    "zigbuild": false, "build-runner": "windows-latest", "test-runner": "windows-latest"}
+          }'
+          if ! jq -e 'type == "array" and length > 0 and all(type == "string") and (unique | length) == length' \
+               <<<"$PLATFORMS" >/dev/null; then
+            echo "::error::platforms must be a non-empty JSON array of distinct names, not $PLATFORMS"
+            exit 1
+          fi
+          unknown=$(jq -r --argjson t "$table" '[.[] | select($t[.] == null)] | join(", ")' <<<"$PLATFORMS")
+          if [ -n "$unknown" ]; then
+            echo "::error::unknown platform(s): $unknown; known: $(jq -r 'keys | join(", ")' <<<"$table")"
+            exit 1
+          fi
+          build=$(jq -c --argjson t "$table" '{include: [.[] | {platform: .} + $t[.]]}' <<<"$PLATFORMS")
+          test=$(jq -c --argjson t "$table" --argjson e "$EMACS_VERSIONS" \
+            '{include: [.[] as $p | (if $p == "windows-x86_64" then ["30.1"] else $e end)[]
+                        | {platform: $p, emacs: ., "test-runner": $t[$p]["test-runner"]}]}' <<<"$PLATFORMS")
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "test=$test" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.platform }}
+    needs: prepare
+    runs-on: ${{ matrix.build-runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.build-matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        if: matrix.zigbuild
+        with:
+          python-version: "3.12"
+      - name: Install zig and cargo-zigbuild
+        if: matrix.zigbuild
+        run: pip install ziglang==0.15.2 cargo-zigbuild==0.23.4
+      - name: Install cargo-emacs
+        env:
+          SOURCE: ${{ inputs.cargo-emacs }}
+        run: |
+          case "$SOURCE" in
+            path:*)
+              cargo install --locked --path "${SOURCE#path:}" ;;
+            *)
+              repo=https://github.com/tohammer/emrs
+              if [[ "$SOURCE" =~ ^[0-9a-f]{40}$ ]]; then
+                cargo install --locked --git "$repo" --rev "$SOURCE" cargo-emacs
+              elif git ls-remote --exit-code --tags "$repo" "refs/tags/$SOURCE" >/dev/null; then
+                cargo install --locked --git "$repo" --tag "$SOURCE" cargo-emacs
+              else
+                cargo install --locked --git "$repo" --branch "$SOURCE" cargo-emacs
+              fi ;;
+          esac
+      - name: Build the module
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PACKAGE: ${{ inputs.package }}
+          TARGET: ${{ matrix.target }}
+          ZIGBUILD: ${{ matrix.zigbuild }}
+        run: |
+          args=(--dir "$RUNNER_TEMP/dist")
+          if [ "$ZIGBUILD" = true ]; then
+            args+=(--zigbuild --target "$TARGET.2.28")
+          else
+            args+=(--target "$TARGET")
+          fi
+          if [ -n "$PACKAGE" ]; then
+            args+=(-p "$PACKAGE")
+          fi
+          cargo emacs package "${args[@]}"
+          count=$(find "$RUNNER_TEMP/dist" -type f | wc -l | tr -d " ")
+          if [ "$count" -ne 1 ]; then
+            echo "::error::the build produced $count module files instead of 1; set the input package"
+            exit 1
+          fi
+      - name: Check the glibc baseline
+        if: matrix.zigbuild
+        run: |
+          file=$(find "$RUNNER_TEMP/dist" -type f)
+          newest=$(readelf --dyn-syms -W "$file" | { grep -o 'GLIBC_[0-9][0-9.]*' || true; } | sed 's/GLIBC_//' | sort -V | tail -n 1)
+          echo "highest glibc symbol version: ${newest:-none}"
+          if [ -n "$newest" ] && [ "$(printf '%s\n%s\n' "$newest" 2.28 | sort -V | tail -n 1)" != 2.28 ]; then
+            echo "::error::$(basename "$file") needs glibc $newest, newer than 2.28"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-${{ matrix.platform }}
+          path: ${{ runner.temp }}/dist/*
+          if-no-files-found: error
+
+  test:
+    name: Test ${{ matrix.platform }} with Emacs ${{ matrix.emacs }}
+    needs: [prepare, build]
+    runs-on: ${{ matrix.test-runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.test-matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10
+        with:
+          toolchain: ${{ inputs.rust-toolchain }}
+      - uses: purcell/setup-emacs@34c6ded44899fd1bf74d2889558befd1750e61a7 # master, 2026-10
+        if: runner.os != 'Windows'
+        with:
+          version: ${{ matrix.emacs }}
+      - uses: jcs090218/setup-emacs-windows@3ad415b5f6575fe0bb8218cb35c199a93b1fb833 # master, 2026-10
+        if: runner.os == 'Windows'
+        with:
+          version: ${{ matrix.emacs }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: module-${{ matrix.platform }}
+          path: ${{ runner.temp }}/asset
+      - name: Prepare the test environment
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          asset=$(find "$RUNNER_TEMP/asset" -type f)
+          base=$(basename "$asset")
+          name=${base%-module-"$PLATFORM".*}
+          ext=${base##*.}
+          dir="$RUNNER_TEMP/emrs-module"
+          mkdir -p "$dir"
+          cp "$asset" "$dir/$name-module.$ext"
+          # Native Windows Emacs needs D:/... paths, not /d/...
+          to_native() { if command -v cygpath >/dev/null; then cygpath -m "$1"; else printf '%s\n' "$1"; fi; }
+          emrs_el=$(cargo metadata --format-version 1 |
+            jq -r '[.packages[] | select(.name == "emrs")][0].manifest_path // empty
+                   | gsub("\\\\"; "/") | sub("/[^/]+/Cargo.toml$"; "/elisp")')
+          if [ -z "$emrs_el" ] || [ ! -f "$emrs_el/emrs.el" ]; then
+            emrs_el=""
+          fi
+          {
+            echo "EMRS_MODULE_FILE=$(to_native "$dir/$name-module.$ext")"
+            echo "EMRS_MODULE_DIR=$(to_native "$dir")"
+            echo "EMRS_MODULE_NAME=$name"
+            echo "EMRS_MODULE_VERSION=$VERSION"
+            echo "EMRS_EL_DIR=$emrs_el"
+          } >> "$GITHUB_ENV"
+      - name: Smoke test
+        run: |
+          emacs --batch --module-assertions --eval '
+            (let* ((name (getenv "EMRS_MODULE_NAME"))
+                   (version (getenv "EMRS_MODULE_VERSION"))
+                   (info (progn (module-load (getenv "EMRS_MODULE_FILE"))
+                                (funcall (intern (concat name "--emrs-info"))))))
+              (unless (and (equal (plist-get info :module) name)
+                           (equal (plist-get info :version) version))
+                (error "Expected module %s version %s, got %S" name version info))
+              (message "%S" info))'
+      - name: Test command
+        if: inputs.test-command != ''
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: eval "$TEST_COMMAND"
+
+  publish:
+    name: Publish
+    if: inputs.publish
+    needs: [prepare, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: module-*
+          merge-multiple: true
+          path: dist
+      - name: Upload to the release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.prepare.outputs.version }}
+        run: |
+          sums=$(sha256sum -- * | sort -k 2)
+          printf '%s\n' "$sums" > SHA256SUMS
+          cat SHA256SUMS
+          # A release made here stays a draft until its files are uploaded, so
+          # nobody sees it without them; one the author made is left as it is.
+          created=false
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            flags=(--draft --verify-tag --title "$TAG" --notes "")
+            if [[ "$TAG" == *-* ]]; then
+              flags+=(--prerelease)
+            fi
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${flags[@]}"
+            created=true
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber -- *
+          if [ "$created" = true ]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+          fi

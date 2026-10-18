@@ -44,38 +44,29 @@ Design notes from the original brainstorming:
 - Never hand Lisp a pointer into Rust memory. Accessors copy the requested
   part into a Lisp value.
 
-## Prebuilt artifacts and distribution
+## Installer for prebuilt modules
 
-Download of prebuilt module binaries with a compile fallback, a CI action,
-and an installer. `info` already reports the module version, the `emrs`
-version, the protocol and the target triple for diagnostics (spec section 14).
+The release side exists (spec `docs/specs/2026-10-17-release-pipeline.md`):
+`cargo emacs package`, the reusable workflow and the asset layout of ADR
+0004. Missing is the Elisp side, a separate library `emrs-install.el` that
+gives a package its module: one already installed, else the release asset
+for its exact version (checked against `SHA256SUMS`), else a `cargo build`
+in the package's checkout. Decided in ADR 0006: ask before downloading
+(user option always/ask/never), install under
+`<user-emacs-directory>/emrs/modules/<module>/<version>/`, build only from a
+checkout. Still open:
 
-Design notes from the original brainstorming:
-
-- Installing a package from MELPA should not require a Rust toolchain. The
-  installer first uses a module that is already present, then downloads a
-  prebuilt binary for the platform, and only then offers a local `cargo
-  build`.
-- The installer is a separate Elisp library, not part of the runtime.
-- One binary per platform serves all supported Emacs versions: the module
-  API only appends fields, and `emacs_module_init` checks the sizes. The
-  open risk is the operating system, mainly the glibc version a Linux binary
-  requires. Build against a fixed old glibc baseline (for example with
-  `cargo-zigbuild`).
-- Test every artifact against every supported Emacs version with
-  `--module-assertions`, and publish checksums.
+- Map `system-configuration` to the platform names of ADR 0004.
 - On a load failure, report what was detected (Emacs version, platform) and
-  what the artifact requires, instead of the bare loader error.
+  what the file requires (glibc 2.28, the macOS version Rust targets).
+- A command that removes old versions from the user directory.
+- quarry's `quarry-build.el` is the model for the build part.
 
 ## `cargo emacs`: further subcommands and configuration
 
-`cargo emacs build` exists (spec `docs/specs/2026-10-11-cargo-emacs-build.md`).
-Ideas from the original brainstorming that were left out: subcommands `test`,
-`package` and `release`; further keys under `[package.metadata.emacs-module]`;
-platform names such as `linux-x86_64` or a `standard` set instead of raw
-target triples; a reusable GitHub Action that builds and tests the release
-matrix (`cargo-dist` is a model); publishing the tool to crates.io. Revisit
-with the prebuilt artifacts work.
+`cargo emacs build` and `cargo emacs package` exist. Left out: subcommands
+`test` and `release`; further keys under `[package.metadata.emacs-module]`;
+publishing the tool to crates.io. Revisit when module authors ask for them.
 
 ## `cargo emacs build` does not check the module name
 
@@ -98,6 +89,25 @@ Origin: review of the `cargo emacs build` change (spec of 2026-10-11),
   exit status 1.
 - Cargo options that print and exit (`--list`, `--version` after `build`) end
   with the "no dynamic library" error.
+
+## Release workflow: deferred review findings
+
+Origin: review of the release pipeline (spec of 2026-10-17), 2026-10-18.
+
+- `actions/checkout@v4`, `setup-python@v5`, `upload-artifact@v4` and
+  `download-artifact@v4` run on Node.js 20, which GitHub forces to Node.js 24
+  with a deprecation warning; `ci.yml` uses `actions/checkout@v4` too. Bump all workflows
+  together when the old majors stop working or new majors are confirmed.
+- The third-party actions are pinned to the commits that passed in PR #10.
+  Update the pins deliberately, for example when a new Emacs version is
+  added to the defaults.
+- `cargo-emacs` defaults to emrs `master`, so a caller that pins the
+  workflow to a commit still gets the newest tool (README says to pin both).
+  A default derived from the workflow's own ref was not found. Revisit if
+  workflow and tool drift apart in practice.
+- `gh release edit --draft=false` (publishing a release the workflow
+  created) has not run on GitHub yet; the first release of a module whose
+  tag has no release exercises it.
 
 ## Pull-style streams and overflow policies
 

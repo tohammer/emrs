@@ -1,7 +1,8 @@
 # Architecture
 
-This document describes the system as it is now. The specification with the
-reasons behind it is `docs/specs/2026-10-03-emrs-core.md`.
+This document describes the system as it is now. The reasons behind it are
+in the specifications in `docs/specs/` (the core is
+`docs/specs/2026-10-03-emrs-core.md`) and the decisions in `docs/decisions/`.
 
 ## Overview
 
@@ -32,7 +33,8 @@ Emacs.
 | `emrs/src/module.rs` | The eight protocol functions and the `module!` macro; wraps every body in `catch_unwind` | `ffi`, `convert`, `runtime` |
 | `emrs/src/testing.rs` | Host for testing services without Emacs | `runtime` |
 | `elisp/emrs.el` | Loads modules and checks their protocol version, owns the wake-up pipe process, drains deliveries and dispatches them to callbacks; public API `emrs-send`, `emrs-call`, `emrs-call-sync`, `emrs-call-stream`, `emrs-call-stream-sync`, `emrs-stop` | module protocol |
-| `cargo-emacs/` | The Cargo subcommand `cargo emacs build`: runs `cargo build`, reads the library path from Cargo's JSON messages and installs it as `<name>-module` plus suffix in `target/emacs/` (ADR 0002). Not linked into modules | `cargo`, `serde_json` |
+| `cargo-emacs/` | The Cargo subcommand. `build` runs `cargo build`, reads the library path from Cargo's JSON messages and installs it as `<name>-module` plus suffix in `target/emacs/` (ADR 0002). `package` does the same as a release build, optionally with `cargo zigbuild`, and writes `<name>-module-<platform>.<ext>` to `target/emacs/dist/`, with the platform name from the target triple (ADR 0004). Not linked into modules | `cargo`, `serde_json` |
+| `.github/workflows/module-release.yml` | Reusable workflow for module repositories: builds the four platforms (ADR 0007) with `cargo emacs package` (Linux with zigbuild against glibc 2.28, ADR 0005), checks the glibc baseline, tests each file in Emacs, and on a tag `v<version>` uploads the files and `SHA256SUMS` to the release (ADR 0004). `release-check.yml` runs it on `examples/echo` without publishing | `cargo-emacs`, GitHub Actions |
 | `tests/emrs-test-module/` | `cdylib` with round-trip and misbehaving services for the ERT suite | `emrs` |
 | `tests/elisp/`, `tests/run-ert.sh` | ERT suite, run with `--module-assertions` | test module, `emrs.el` |
 | `examples/echo`, `examples/grep` | Complete example modules with smoke tests (`examples/run-examples.sh`) | `emrs`, `emrs.el` |
@@ -101,5 +103,12 @@ Emacs.
 - Under Git Bash, a crashed native Windows process shows up only as exit
   code 127. Run it from PowerShell for the real status, and read the
   Application event log for the faulting module.
+- `purcell/setup-emacs` installs Emacs through Nix, and nixpkgs dropped
+  `x86_64-darwin` in 26.11, so it cannot test on Intel Macs; this is why
+  macOS x86_64 is not a release platform (ADR 0007).
+- A module built on a current runner needs the runner's glibc (2.34 or
+  newer for a plain `cargo build` on Ubuntu 24.04). zigbuild with
+  `<triple>.2.28` keeps it at 2.28; the release workflow checks this with
+  `readelf` (ADR 0005).
 - `copy_string_contents` returns the raw bytes of unibyte strings, including
   bytes above 127. No fallback is needed.

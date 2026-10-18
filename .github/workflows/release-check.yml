@@ -1,0 +1,50 @@
+# Runs the reusable module release workflow on the example `echo` without
+# publishing, so changes to it, to cargo-emacs or to emrs are tested on every
+# platform it builds for.
+
+name: Release check
+
+on:
+  pull_request:
+    paths:
+      - "cargo-emacs/**"
+      - "emrs/**"
+      - "examples/echo/**"
+      - "elisp/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/module-release.yml"
+      - ".github/workflows/release-check.yml"
+  push:
+    branches: [master]
+    paths:
+      - "cargo-emacs/**"
+      - "emrs/**"
+      - "examples/echo/**"
+      - "elisp/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/module-release.yml"
+      - ".github/workflows/release-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  echo:
+    uses: ./.github/workflows/module-release.yml
+    with:
+      package: echo-rs
+      cargo-emacs: path:cargo-emacs
+      publish: false
+      test-command: |
+        emacs --batch --module-assertions -L "$EMRS_EL_DIR" -L "$EMRS_MODULE_DIR" --eval '
+          (progn
+            (require (quote emrs))
+            (let* ((e (emrs-start (quote echo-rs) "echo" nil))
+                   (reply (emrs-call-sync e (quote (:echo "hi")) 5.0)))
+              (unless (equal reply "hi")
+                (error "Expected \"hi\", got %S" reply))
+              (emrs-stop e)
+              (message "echo round trip: %S" reply)))'
