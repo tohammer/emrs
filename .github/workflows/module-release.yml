@@ -22,7 +22,7 @@ on:
       platforms:
         description: JSON array of the platforms to build, test and publish
         type: string
-        default: '["linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64", "windows-x86_64"]'
+        default: '["linux-x86_64", "linux-aarch64", "macos-aarch64", "windows-x86_64"]'
       emacs-versions:
         description: JSON array of Emacs versions for the tests on Linux and macOS (Windows uses 30.1)
         type: string
@@ -88,7 +88,6 @@ jobs:
           table='{
             "linux-x86_64":   {"target": "x86_64-unknown-linux-gnu",  "zigbuild": true,  "build-runner": "ubuntu-latest",  "test-runner": "ubuntu-latest"},
             "linux-aarch64":  {"target": "aarch64-unknown-linux-gnu", "zigbuild": true,  "build-runner": "ubuntu-latest",  "test-runner": "ubuntu-24.04-arm"},
-            "macos-x86_64":   {"target": "x86_64-apple-darwin",       "zigbuild": false, "build-runner": "macos-latest",   "test-runner": "macos-15-intel"},
             "macos-aarch64":  {"target": "aarch64-apple-darwin",      "zigbuild": false, "build-runner": "macos-latest",   "test-runner": "macos-latest"},
             "windows-x86_64": {"target": "x86_64-pc-windows-msvc",    "zigbuild": false, "build-runner": "windows-latest", "test-runner": "windows-latest"}
           }'

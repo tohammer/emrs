@@ -35,7 +35,7 @@ Options:
     all others          Passed to Cargo unchanged (--message-format is not allowed);
                         --release is added unless --release or --profile is given
 
-Platforms: linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64.";
+Platforms: linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64.";
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
@@ -143,7 +143,6 @@ pub fn platform_from_triple(triple: &str) -> Result<&'static str, String> {
     match base {
         "x86_64-unknown-linux-gnu" => Ok("linux-x86_64"),
         "aarch64-unknown-linux-gnu" => Ok("linux-aarch64"),
-        "x86_64-apple-darwin" => Ok("macos-x86_64"),
         "aarch64-apple-darwin" => Ok("macos-aarch64"),
         "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => Ok("windows-x86_64"),
         _ => Err(format!("the target `{triple}` has no platform name; give one with `--platform`")),
@@ -440,7 +439,6 @@ mod tests {
         for (triple, platform) in [
             ("x86_64-unknown-linux-gnu", "linux-x86_64"),
             ("aarch64-unknown-linux-gnu", "linux-aarch64"),
-            ("x86_64-apple-darwin", "macos-x86_64"),
             ("aarch64-apple-darwin", "macos-aarch64"),
             ("x86_64-pc-windows-msvc", "windows-x86_64"),
             ("x86_64-pc-windows-gnu", "windows-x86_64"),
@@ -463,6 +461,7 @@ mod tests {
         assert!(err.contains("riscv64gc-unknown-linux-gnu") && err.contains("--platform"), "{err}");
         assert!(platform_from_triple("").is_err());
         assert!(platform_from_triple("x86_64-unknown-linux-musl").is_err());
+        assert!(platform_from_triple("x86_64-apple-darwin").is_err());
     }
 
     #[test]

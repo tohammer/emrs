@@ -9,8 +9,6 @@ const HOST_PLATFORM: &str = if cfg!(all(target_os = "linux", target_arch = "x86_
     "linux-x86_64"
 } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
     "linux-aarch64"
-} else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-    "macos-x86_64"
 } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
     "macos-aarch64"
 } else {

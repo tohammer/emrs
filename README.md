@@ -112,12 +112,12 @@ rename it to `<name>-module.<ext>`.
 
 A release of a module is the release tagged `v<version>`, where `<version>`
 is the `version` in the module's `Cargo.toml`. It holds one file per
-platform and a checksum file:
+platform and a checksum file (macOS x86_64 is not among them, ADR 0007;
+Intel Macs build the module locally):
 
 ```text
 <name>-module-linux-x86_64.so
 <name>-module-linux-aarch64.so
-<name>-module-macos-x86_64.dylib
 <name>-module-macos-aarch64.dylib
 <name>-module-windows-x86_64.dll
 SHA256SUMS
@@ -177,7 +177,7 @@ builds and tests without publishing.
 |---|---|---|
 | `package` | `""` | Cargo package of the module; empty for the package in `working-directory` |
 | `working-directory` | `"."` | Where Cargo runs |
-| `platforms` | all five | JSON array, for example `'["linux-x86_64", "macos-aarch64"]'` |
+| `platforms` | all four | JSON array, for example `'["linux-x86_64", "macos-aarch64"]'` |
 | `emacs-versions` | `'["30.1", "31.1"]'` | Emacs versions for the tests on Linux and macOS; Windows uses 30.1 |
 | `test-command` | `""` | Bash command run after the smoke test for each file |
 | `publish` | `false` | Upload to the release of the tag; the tag must be `v<version>` |
@@ -215,7 +215,7 @@ Set `EMACS` to run the Emacs suites with another binary, for example
 `EMACS=/path/to/emacs-30 tests/run-ert.sh`. CI runs all of this on pull
 requests and on pushes to `master`. When `cargo-emacs`, `emrs`,
 `examples/echo` or the release workflow change, the workflow "Release check"
-also runs the release workflow on `echo` for all five platforms, without
+also runs the release workflow on `echo` for all four platforms, without
 publishing.
 
 ## Documentation

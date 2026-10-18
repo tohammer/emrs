@@ -18,7 +18,7 @@ Success:
   `<name>-module-<platform>.<ext>` for the host or a given target.
 - A module repository adds a short workflow that calls emrs's reusable
   workflow. A pushed tag `v<version>` then produces the release assets for
-  five platforms, each tested in Emacs with `--module-assertions`, and
+  four platforms, each tested in Emacs with `--module-assertions`, and
   `SHA256SUMS`.
 - emrs's own CI runs that workflow on the example `echo` without publishing.
 
@@ -62,13 +62,13 @@ The reasons are in [ADR 0004](../decisions/0004-release-assets-per-exact-version
   extension Cargo produced (`so`, `dylib`, `dll`).
 - **Platforms.** The name depends on the target triple. For zigbuild the
   glibc suffix is ignored, so `x86_64-unknown-linux-gnu.2.28` maps like
-  `x86_64-unknown-linux-gnu`.
+  `x86_64-unknown-linux-gnu`. macOS x86_64 is not a release platform
+  ([ADR 0007](../decisions/0007-no-release-builds-for-intel-macs.md)).
 
   | Platform | Target triple(s) | Built by the workflow on | Tested by the workflow on |
   |---|---|---|---|
   | `linux-x86_64` | `x86_64-unknown-linux-gnu` | `ubuntu-latest`, zigbuild, glibc 2.28 | `ubuntu-latest` |
   | `linux-aarch64` | `aarch64-unknown-linux-gnu` | `ubuntu-latest`, zigbuild, glibc 2.28 | `ubuntu-24.04-arm` |
-  | `macos-x86_64` | `x86_64-apple-darwin` | `macos-latest`, cross | `macos-15-intel` |
   | `macos-aarch64` | `aarch64-apple-darwin` | `macos-latest` | `macos-latest` |
   | `windows-x86_64` | `x86_64-pc-windows-msvc`, `x86_64-pc-windows-gnu` | `windows-latest` (MSVC) | `windows-latest` |
 
@@ -140,7 +140,7 @@ Inputs:
 |---|---|---|
 | `package` | string, `""` | Cargo package of the module, passed as `-p`. Empty: the package in `working-directory` |
 | `working-directory` | string, `"."` | Directory of the caller's repository where Cargo runs |
-| `platforms` | string (JSON array), all five | Platforms to build, test and publish |
+| `platforms` | string (JSON array), all four | Platforms to build, test and publish |
 | `emacs-versions` | string (JSON array), `["30.1", "31.1"]` | Emacs versions for the tests on Linux and macOS. Windows is tested with 30.1 only |
 | `test-command` | string, `""` | Bash command that tests one asset, run after the smoke test; empty runs the smoke test only |
 | `publish` | boolean, `false` | Upload to the GitHub release of the tag |
@@ -246,13 +246,13 @@ is uploaded unless all builds and tests passed:
   path; the build is a release build (the file comes from
   `target/release`); `--platform` overrides the name; an unknown `--target`
   without `--platform` fails with exit status 1 before Cargo runs.
-- The dry run in emrs builds and tests `echo` on all five platforms, with
+- The dry run in emrs builds and tests `echo` on all four platforms, with
   the smoke test and the round trip through `EMRS_EL_DIR`. Its passing run
   on the pull request is the test of the workflow.
 - Manual: the `publish` path runs only on a tag. It is checked once by
   calling the workflow from a scratch repository owned by the user, tagged
   with that module's version. Whoever checks it confirms that the release
-  has five assets and a `SHA256SUMS` that `sha256sum -c` accepts after
+  has four assets (or one per requested platform) and a `SHA256SUMS` that `sha256sum -c` accepts after
   downloading.
 - Not tested: zigbuild locally (it runs only in the workflow), Emacs 31 on
   Windows, other Windows Emacs builds.
@@ -268,15 +268,13 @@ is uploaded unless all builds and tests passed:
   existing `target/emacs/dist/echo-rs-module-<host platform>.<ext>`.
 - [ ] 2. Write `.github/workflows/module-release.yml` and
   `.github/workflows/release-check.yml` as designed. *Done when* the release
-  check passes on the pull request for all five platforms, including the
+  check passes on the pull request for all four platforms, including the
   glibc check on both Linux platforms, the smoke test and the echo round
   trip through `EMRS_EL_DIR` with both Emacs versions, and a deliberate failure is seen to fail the run once (for
   example a temporary smoke test with a wrong version, removed afterwards).
-  If the runner `macos-15-intel` does not exist, stop and report instead of
-  dropping the test.
 - [ ] 3. Check the `publish` path manually as described under Testing, with
   the user's permission and a repository they name. *Done when* the release
-  holds five assets and `SHA256SUMS`, and `sha256sum -c SHA256SUMS` passes on
+  holds one asset per requested platform and `SHA256SUMS`, and `sha256sum -c SHA256SUMS` passes on
   the downloaded files.
 - [ ] 4. Documentation: README section "Releasing prebuilt modules" (the
   contract, `cargo emacs package`, the caller workflow, the version bump after
