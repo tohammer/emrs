@@ -170,8 +170,17 @@ jobs:
 
 Pushing the tag `v<version>` builds every platform, tests each file in Emacs
 with `--module-assertions` and uploads the files and `SHA256SUMS` to the
-release; the release is created if it does not exist. A run started by hand
+release. If the release does not exist, it is created as a draft, filled and
+then published, as a prerelease if the version contains `-`; a release you
+created beforehand, draft or not, is kept as it is. A run started by hand
 builds and tests without publishing.
+
+Only the publish job gets the write token; the jobs that build and test run
+with read access. Pin the workflow and `cargo-emacs` to the same emrs
+commit (`module-release.yml@<commit>` and `cargo-emacs: <commit>`) if the
+release must not change with emrs's `master`. A `rust-toolchain.toml` in the
+module's repository overrides `rust-toolchain`; it must then list the
+targets of the platforms built.
 
 | Input | Default | Meaning |
 |---|---|---|
@@ -181,7 +190,7 @@ builds and tests without publishing.
 | `emacs-versions` | `'["30.1", "31.1"]'` | Emacs versions for the tests on Linux and macOS; Windows uses 30.1 |
 | `test-command` | `""` | Bash command run after the smoke test for each file |
 | `publish` | `false` | Upload to the release of the tag; the tag must be `v<version>` |
-| `cargo-emacs` | `master` | Branch, tag or commit of emrs to install `cargo-emacs` from, or `path:<dir>` |
+| `cargo-emacs` | `master` | Branch, tag or full commit hash of emrs to install `cargo-emacs` from, or `path:<dir>` |
 | `rust-toolchain` | `stable` | Rust toolchain for builds and tests |
 
 Each test first loads the file and checks that the module reports its name
@@ -214,7 +223,8 @@ examples/run-examples.sh   # the example modules
 Set `EMACS` to run the Emacs suites with another binary, for example
 `EMACS=/path/to/emacs-30 tests/run-ert.sh`. CI runs all of this on pull
 requests and on pushes to `master`. When `cargo-emacs`, `emrs`,
-`examples/echo` or the release workflow change, the workflow "Release check"
+`elisp`, `examples/echo`, the workspace's `Cargo.toml` or `Cargo.lock`, or
+the release workflow change, the workflow "Release check"
 also runs the release workflow on `echo` for all four platforms, without
 publishing.
 

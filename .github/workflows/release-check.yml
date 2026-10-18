@@ -10,6 +10,9 @@ on:
       - "cargo-emacs/**"
       - "emrs/**"
       - "examples/echo/**"
+      - "elisp/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/module-release.yml"
       - ".github/workflows/release-check.yml"
   push:
@@ -18,9 +21,15 @@ on:
       - "cargo-emacs/**"
       - "emrs/**"
       - "examples/echo/**"
+      - "elisp/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
       - ".github/workflows/module-release.yml"
       - ".github/workflows/release-check.yml"
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   echo:

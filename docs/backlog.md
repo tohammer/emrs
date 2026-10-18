@@ -90,6 +90,25 @@ Origin: review of the `cargo emacs build` change (spec of 2026-10-11),
 - Cargo options that print and exit (`--list`, `--version` after `build`) end
   with the "no dynamic library" error.
 
+## Release workflow: deferred review findings
+
+Origin: review of the release pipeline (spec of 2026-10-17), 2026-10-18.
+
+- `actions/checkout@v4`, `setup-python@v5`, `upload-artifact@v4` and
+  `download-artifact@v4` run on Node.js 20, which GitHub forces to Node.js 24
+  with a deprecation warning; `ci.yml` has the same. Bump all workflows
+  together when the old majors stop working or new majors are confirmed.
+- The third-party actions are pinned to the commits that passed in PR #10.
+  Update the pins deliberately, for example when a new Emacs version is
+  added to the defaults.
+- `cargo-emacs` defaults to emrs `master`, so a caller that pins the
+  workflow to a commit still gets the newest tool (README says to pin both).
+  A default derived from the workflow's own ref was not found. Revisit if
+  workflow and tool drift apart in practice.
+- `gh release edit --draft=false` (publishing a release the workflow
+  created) has not run on GitHub yet; the first release of a module whose
+  tag has no release exercises it.
+
 ## Pull-style streams and overflow policies
 
 Consumer-driven stream consumption, and drop or coalesce policies as

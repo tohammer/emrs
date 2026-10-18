@@ -152,8 +152,8 @@ Jobs:
 1. **`prepare`** (Ubuntu). Checks out the caller's repository and reads the
    module crate's version with `cargo metadata`. With `publish` true, the
    workflow ref must be the tag `v<version>`; otherwise the job fails with a
-   message that names both. Every entry of `platforms` must be in the
-   table. It outputs the version.
+   message that names both. `platforms` must be a non-empty JSON array of
+   distinct names from the table. It outputs the version.
 2. **`build`** (one job per platform in `platforms`, on the runner from the
    table). Installs the toolchain and its target, `cargo-emacs` as `cargo-emacs`
    says, and for Linux pinned versions of zig and `cargo-zigbuild`. Runs
@@ -190,12 +190,17 @@ Jobs:
 4. **`publish`** (Ubuntu, only with `publish` true, after every `test` job
    passed). Downloads all assets, writes `SHA256SUMS` over them with
    `sha256sum`, creates the release for the tag if it does not exist (title
-   `v<version>`, no notes) and uploads the assets and `SHA256SUMS` with
-   `gh release upload --clobber`. A release the author created beforehand,
+   `v<version>`, no notes, as a draft, and as a prerelease if the version
+   contains `-`), uploads the assets and `SHA256SUMS` with
+   `gh release upload --clobber`, and publishes a release it created only
+   after the upload. A release the author created beforehand,
    with notes or as a draft, is kept and gets the files.
 
-Every third-party action is pinned to a major version or a commit, as in
-`ci.yml`.
+Actions of GitHub (`actions/*`) are pinned to a major version, all others to
+a commit. Only `publish` keeps the caller's token; `prepare`, `build` and
+`test`, which run the module's build scripts and tests, request
+`contents: read`, and no checkout keeps credentials. Every input reaches a
+shell through an environment variable, not through `${{ }}` in the script.
 
 ### Dry run in emrs
 
@@ -205,7 +210,8 @@ Every third-party action is pinned to a major version or a commit, as in
 `EMRS_MODULE_DIR`, starts the echo service and checks one `emrs-call-sync`
 round trip.
 It runs on pull requests and on pushes to `master` that change
-`cargo-emacs/`, `emrs/`, `examples/echo/` or either workflow file, and on
+`cargo-emacs/`, `emrs/`, `examples/echo/`, `elisp/`, the workspace's
+`Cargo.toml` or `Cargo.lock`, or either workflow file, and on
 `workflow_dispatch`. It is a separate workflow, so the regular CI keeps its
 duration.
 
@@ -228,6 +234,7 @@ is uploaded unless all builds and tests passed:
 |---|---|
 | Tag and crate version differ | `prepare` fails with both values |
 | A platform in `platforms` is not in the table | `prepare` fails and names it |
+| `platforms` is empty, not an array of strings, or has duplicates | `prepare` fails and shows the value |
 | A build produces no file or more than one | `build` fails; the message points to `package` |
 | A Linux library needs glibc newer than 2.28 | `build` fails and names the symbol version found |
 | `cargo metadata` fails in a test job | `test` fails with Cargo's error |
@@ -273,7 +280,7 @@ is uploaded unless all builds and tests passed:
   glibc check on both Linux platforms, the smoke test and the echo round
   trip through `EMRS_EL_DIR` with both Emacs versions, and a deliberate failure is seen to fail the run once (for
   example a temporary smoke test with a wrong version, removed afterwards).
-- [ ] 3. Check the `publish` path manually as described under Testing, with
+- [x] 3. Check the `publish` path manually as described under Testing, with
   the user's permission and a repository they name. *Done when* the release
   holds one asset per requested platform and `SHA256SUMS`, and `sha256sum -c SHA256SUMS` passes on
   the downloaded files.
