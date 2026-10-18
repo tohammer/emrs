@@ -266,7 +266,7 @@ is uploaded unless all builds and tests passed:
   `cargo test --workspace` pass, and
   `cargo run -q -p cargo-emacs -- package -p echo-rs` prints the path of an
   existing `target/emacs/dist/echo-rs-module-<host platform>.<ext>`.
-- [ ] 2. Write `.github/workflows/module-release.yml` and
+- [x] 2. Write `.github/workflows/module-release.yml` and
   `.github/workflows/release-check.yml` as designed. *Done when* the release
   check passes on the pull request for all four platforms, including the
   glibc check on both Linux platforms, the smoke test and the echo round
