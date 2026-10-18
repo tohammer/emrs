@@ -96,7 +96,7 @@ Origin: review of the release pipeline (spec of 2026-10-17), 2026-10-18.
 
 - `actions/checkout@v4`, `setup-python@v5`, `upload-artifact@v4` and
   `download-artifact@v4` run on Node.js 20, which GitHub forces to Node.js 24
-  with a deprecation warning; `ci.yml` has the same. Bump all workflows
+  with a deprecation warning; `ci.yml` uses `actions/checkout@v4` too. Bump all workflows
   together when the old majors stop working or new majors are confirmed.
 - The third-party actions are pinned to the commits that passed in PR #10.
   Update the pins deliberately, for example when a new Emacs version is

@@ -33,7 +33,7 @@ Options:
                         --target, or from the host of `rustc -vV`
     --zigbuild          Run `cargo zigbuild` instead of `cargo build`
     all others          Passed to Cargo unchanged (--message-format is not allowed);
-                        --release is added unless --release or --profile is given
+                        --release is added unless --release, -r or --profile is given
 
 Platforms: linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64.";
 

@@ -1,7 +1,8 @@
 # Architecture
 
-This document describes the system as it is now. The specification with the
-reasons behind it is `docs/specs/2026-10-03-emrs-core.md`.
+This document describes the system as it is now. The reasons behind it are
+in the specifications in `docs/specs/` (the core is
+`docs/specs/2026-10-03-emrs-core.md`) and the decisions in `docs/decisions/`.
 
 ## Overview
 
@@ -102,5 +103,12 @@ Emacs.
 - Under Git Bash, a crashed native Windows process shows up only as exit
   code 127. Run it from PowerShell for the real status, and read the
   Application event log for the faulting module.
+- `purcell/setup-emacs` installs Emacs through Nix, and nixpkgs dropped
+  `x86_64-darwin` in 26.11, so it cannot test on Intel Macs; this is why
+  macOS x86_64 is not a release platform (ADR 0007).
+- A module built on a current runner needs the runner's glibc (2.34 or
+  newer for a plain `cargo build` on Ubuntu 24.04). zigbuild with
+  `<triple>.2.28` keeps it at 2.28; the release workflow checks this with
+  `readelf` (ADR 0005).
 - `copy_string_contents` returns the raw bytes of unibyte strings, including
   bytes above 127. No fallback is needed.

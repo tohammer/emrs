@@ -1,6 +1,6 @@
 # Release pipeline for prebuilt modules
 
-Status: approved
+Status: implemented
 Date: 2026-10-17
 
 ## Purpose
@@ -70,7 +70,7 @@ The reasons are in [ADR 0004](../decisions/0004-release-assets-per-exact-version
   | `linux-x86_64` | `x86_64-unknown-linux-gnu` | `ubuntu-latest`, zigbuild, glibc 2.28 | `ubuntu-latest` |
   | `linux-aarch64` | `aarch64-unknown-linux-gnu` | `ubuntu-latest`, zigbuild, glibc 2.28 | `ubuntu-24.04-arm` |
   | `macos-aarch64` | `aarch64-apple-darwin` | `macos-latest` | `macos-latest` |
-  | `windows-x86_64` | `x86_64-pc-windows-msvc`, `x86_64-pc-windows-gnu` | `windows-latest` (MSVC) | `windows-latest` |
+  | `windows-x86_64` | `x86_64-pc-windows-msvc` (also `x86_64-pc-windows-gnu` for `package`) | `windows-latest` (MSVC) | `windows-latest` |
 
 - **Checksums.** `SHA256SUMS` in the release, in the output format of
   `sha256sum` (`<64 lowercase hex>  <file>`, two spaces), one line per asset,
@@ -157,7 +157,7 @@ Jobs:
 2. **`build`** (one job per platform in `platforms`, on the runner from the
    table). Installs the toolchain and its target, `cargo-emacs` as `cargo-emacs`
    says, and for Linux pinned versions of zig and `cargo-zigbuild`. Runs
-   `cargo emacs package --target <triple> [-p <package>] --dir dist`, with
+   `cargo emacs package --target <triple> [-p <package>] --dir $RUNNER_TEMP/dist`, with
    `--zigbuild` and the triple `<triple>.2.28` on Linux. The run must produce
    exactly one file. On Linux, the highest `GLIBC_` symbol version that
    `readelf --dyn-syms -W` reports for the file must be at most 2.28
@@ -173,9 +173,10 @@ Jobs:
    (its directory), `EMRS_MODULE_NAME`, `EMRS_MODULE_VERSION` and
    `EMRS_EL_DIR`.
 
-   `EMRS_EL_DIR` is the `elisp/` directory of the `emrs` package the module
-   depends on, found with `cargo metadata` in `working-directory` (the
-   directory of emrs's `Cargo.toml`, its parent, then `elisp/`), so a test
+   `EMRS_EL_DIR` is the `elisp/` directory next to the crate directory of
+   the `emrs` package the module depends on, found with `cargo metadata` in
+   `working-directory` (in the emrs repository, `emrs/` and `elisp/` are
+   siblings), so a test
    loads the `emrs.el` that matches the module. It is empty if that
    directory has no `emrs.el`. The toolchain is there so that a
    `test-command` can run `cargo` (for example `cargo metadata` or Rust
@@ -284,12 +285,31 @@ is uploaded unless all builds and tests passed:
   the user's permission and a repository they name. *Done when* the release
   holds one asset per requested platform and `SHA256SUMS`, and `sha256sum -c SHA256SUMS` passes on
   the downloaded files.
-- [ ] 4. Documentation: README section "Releasing prebuilt modules" (the
+- [x] 4. Documentation: README section "Releasing prebuilt modules" (the
   contract, `cargo emacs package`, the caller workflow, the version bump after
   a release from ADR 0004, `sha256sum` for manual releases), `cargo-emacs`
   and workflow rows in `docs/architecture.md`, the backlog items
-  "Prebuilt artifacts and distribution" and "`cargo emacs`: further
+  "Prebuilt artifacts and distribution" (now "Installer for prebuilt
+  modules") and "`cargo emacs`: further
   subcommands" reduced to what remains, and `docs/next-steps.md` naming the
   installer spec as next. *Done when* the README commands match the tool's
   `--help` and the workflow's inputs, and the doc-checker reports nothing
   stale.
+
+## Changes during implementation
+
+The text above describes the result. It differs from the approved draft in
+these points:
+
+- macOS x86_64 was dropped after the first CI run could not install Emacs
+  on the Intel runner (ADR 0007); five platforms became four.
+- From the review: `-r` counts as a profile choice; `package` fails when the
+  library was built for another platform than the derived one; the
+  workflow's jobs other than `publish` have a read-only token; third-party
+  actions are pinned to commits; a release the workflow creates is a draft
+  until its files are uploaded, and a prerelease for versions with `-`;
+  `platforms` is validated; the release check also runs on changes to
+  `elisp/` and the workspace manifests.
+- Task 3 published emrs-dirdiff v0.1.0 with the publish job from before the
+  review; the draft flow was checked with `gh` by hand, apart from
+  `gh release edit --draft=false` (backlog).

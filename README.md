@@ -138,8 +138,8 @@ cargo emacs package                 # target/emacs/dist/echo-rs-module-linux-x86
 cargo emacs package --target aarch64-apple-darwin
 ```
 
-- It builds a release build (it adds `--release` unless `--release` or
-  `--profile` is given) and writes `<name>-module-<platform>.<ext>` to
+- It builds a release build (it adds `--release` unless `--release`,
+  `-r` or `--profile` is given) and writes `<name>-module-<platform>.<ext>` to
   `emacs/dist/` in the target directory, or to `--dir <path>`.
 - The platform comes from `--target`, or from the host if there is none.
   `--platform <name>` sets it for other targets.
@@ -224,9 +224,9 @@ Set `EMACS` to run the Emacs suites with another binary, for example
 `EMACS=/path/to/emacs-30 tests/run-ert.sh`. CI runs all of this on pull
 requests and on pushes to `master`. When `cargo-emacs`, `emrs`,
 `elisp`, `examples/echo`, the workspace's `Cargo.toml` or `Cargo.lock`, or
-the release workflow change, the workflow "Release check"
-also runs the release workflow on `echo` for all four platforms, without
-publishing.
+`.github/workflows/module-release.yml` or `release-check.yml` change, the
+workflow "Release check" also runs the release workflow on `echo` for all
+four platforms, without publishing; it can also be started by hand.
 
 ## Documentation
 
@@ -236,6 +236,9 @@ publishing.
 - `docs/implementation-plan.md`: the task-by-task plan the first version was
   built from. Its code blocks show the state before review; the repository is
   the current source.
+- `docs/specs/`: the specifications of later features, such as
+  `cargo emacs build` and the release pipeline.
+- `docs/decisions/`: the decisions behind them (ADRs).
 - `docs/architecture.md`: how the system is built now.
 - `docs/backlog.md` and `docs/next-steps.md`: open points and what comes next.
 
