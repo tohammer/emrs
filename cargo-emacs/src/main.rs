@@ -5,7 +5,10 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command as Process, ExitCode, Stdio};
 
-use cargo_emacs::{Artifact, BuildArgs, Command, USAGE, parse_args, resolve_name, select_artifacts};
+use cargo_emacs::{
+    Artifact, BuildArgs, Command, PACKAGE_USAGE, PackageArgs, USAGE, host_from_rustc_vv, parse_args,
+    platform_from_triple, resolve_name, select_artifacts, target_from_args,
+};
 use serde_json::Value;
 
 /// A reason to stop: the exit status, and the message to print first if any.
@@ -28,21 +31,28 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match parse_args(&args) {
         Ok(Command::Help) => println!("{USAGE}"),
+        Ok(Command::PackageHelp) => println!("{PACKAGE_USAGE}"),
         Ok(Command::Version) => println!("cargo-emacs {}", env!("CARGO_PKG_VERSION")),
-        Ok(Command::Build(build)) => {
-            if let Err(failure) = run_build(&build) {
-                if let Some(message) = failure.message {
-                    eprintln!("{message}");
-                }
-                return ExitCode::from(failure.code);
-            }
-        }
+        Ok(Command::Build(build)) => return finish(run_build(&build, None)),
+        Ok(Command::Package(package)) => return finish(run_package(&package)),
         Err(message) => {
             eprintln!("cargo emacs: {message}\n\n{USAGE}");
             return ExitCode::from(2);
         }
     }
     ExitCode::SUCCESS
+}
+
+fn finish(result: Result<(), Failure>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            if let Some(message) = failure.message {
+                eprintln!("{message}");
+            }
+            ExitCode::from(failure.code)
+        }
+    }
 }
 
 /// A workspace package as far as the tool needs it.
@@ -62,9 +72,16 @@ fn cargo() -> Process {
     Process::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
 }
 
-fn run_build(args: &BuildArgs) -> Result<(), Failure> {
+/// How `package` differs from `build`.
+struct Packaging<'a> {
+    platform: &'a str,
+    zigbuild: bool,
+}
+
+fn run_build(args: &BuildArgs, packaging: Option<&Packaging>) -> Result<(), Failure> {
     let workspace = read_workspace(args.manifest_path.as_deref())?;
-    let artifacts = run_cargo_build(args, &workspace.members)?;
+    let subcommand = if packaging.is_some_and(|p| p.zigbuild) { "zigbuild" } else { "build" };
+    let artifacts = run_cargo_build(subcommand, args, &workspace.members)?;
     if artifacts.is_empty() {
         return Err(Failure::new(
             "the build produced no dynamic library of a workspace package; \
@@ -73,21 +90,56 @@ fn run_build(args: &BuildArgs) -> Result<(), Failure> {
         ));
     }
     let installs = plan_installs(&workspace, &artifacts)?;
-    let dir = match (&args.dir, &args.target_dir) {
+    let default_dir = match &args.target_dir {
+        Some(target) => target.join("emacs"),
+        None => workspace.target_directory.join("emacs"),
+    };
+    let dir = match (&args.dir, packaging) {
         (Some(dir), _) => dir.clone(),
-        (None, Some(target)) => target.join("emacs"),
-        (None, None) => workspace.target_directory.join("emacs"),
+        (None, Some(_)) => default_dir.join("dist"),
+        (None, None) => default_dir,
     };
     std::fs::create_dir_all(&dir)
         .map_err(|e| Failure::new(format!("cannot create directory {}: {e}", dir.display())))?;
     for (name, library) in installs {
         let ext = library.extension().and_then(|e| e.to_str()).unwrap_or("so");
-        let destination = dir.join(format!("{name}-module.{ext}"));
+        let destination = match packaging {
+            Some(p) => dir.join(format!("{name}-module-{}.{ext}", p.platform)),
+            None => dir.join(format!("{name}-module.{ext}")),
+        };
         install(&library, &destination)?;
         let shown = std::path::absolute(&destination).unwrap_or(destination);
         println!("{}", shown.display());
     }
     Ok(())
+}
+
+fn run_package(args: &PackageArgs) -> Result<(), Failure> {
+    let platform = match &args.platform {
+        Some(platform) => platform.clone(),
+        None => {
+            let triple = match target_from_args(&args.build.passthrough) {
+                Some(triple) => triple,
+                None => host_triple()?,
+            };
+            platform_from_triple(&triple).map_err(Failure::new)?.to_string()
+        }
+    };
+    run_build(&args.build, Some(&Packaging { platform: &platform, zigbuild: args.zigbuild }))
+}
+
+/// The host triple, from `rustc -vV`.
+fn host_triple() -> Result<String, Failure> {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = Process::new(&rustc)
+        .arg("-vV")
+        .output()
+        .map_err(|e| Failure::new(format!("cannot run {}: {e}", Path::new(&rustc).display())))?;
+    if !output.status.success() {
+        return Err(Failure::new(format!("`rustc -vV` failed: {}", String::from_utf8_lossy(&output.stderr).trim())));
+    }
+    host_from_rustc_vv(&String::from_utf8_lossy(&output.stdout))
+        .ok_or_else(|| Failure::new("the output of `rustc -vV` has no `host:` line".to_string()))
 }
 
 fn read_workspace(manifest_path: Option<&str>) -> Result<Workspace, Failure> {
@@ -120,10 +172,10 @@ fn parse_metadata(json: &Value) -> Option<Workspace> {
     Some(Workspace { target_directory, members, packages })
 }
 
-/// Run `cargo build` and collect the libraries of workspace members from its messages.
-fn run_cargo_build(args: &BuildArgs, members: &[String]) -> Result<Vec<Artifact>, Failure> {
+/// Run `cargo <subcommand>` (`build` or `zigbuild`) and collect the libraries of workspace members from its messages.
+fn run_cargo_build(subcommand: &str, args: &BuildArgs, members: &[String]) -> Result<Vec<Artifact>, Failure> {
     let mut child = cargo()
-        .args(["build", "--message-format=json-render-diagnostics"])
+        .args([subcommand, "--message-format=json-render-diagnostics"])
         .args(&args.passthrough)
         .stdout(Stdio::piped())
         .spawn()

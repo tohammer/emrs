@@ -259,7 +259,7 @@ is uploaded unless all builds and tests passed:
 
 ## Tasks
 
-- [ ] 1. Add `package` to `cargo-emacs` as designed, with `--help` text and
+- [x] 1. Add `package` to `cargo-emacs` as designed, with `--help` text and
   the unit and integration tests above. *Done when*
   `cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings` and

@@ -1,5 +1,5 @@
-//! Logic of `cargo emacs build` that needs no running Cargo: argument splitting, module name resolution and artifact
-//! selection from Cargo's JSON messages.
+//! Logic of `cargo emacs build` and `package` that needs no running Cargo: argument splitting, platform names, module
+//! name resolution and artifact selection from Cargo's JSON messages.
 
 use std::path::PathBuf;
 
@@ -11,18 +11,51 @@ Build Emacs dynamic modules and install them as <name>-module.<suffix>.
 
 Usage:
     cargo emacs build [--dir <path>] [<cargo build options>...]
+    cargo emacs package [--dir <path>] [--platform <name>] [--zigbuild] [<cargo build options>...]
     cargo emacs --help | --version
 
-Options:
+Options of build:
     --dir <path>   Install into <path> instead of <target-directory>/emacs
-    all others     Passed to `cargo build` unchanged (--message-format is not allowed)";
+    all others     Passed to `cargo build` unchanged (--message-format is not allowed)
+
+Run `cargo emacs package --help` for the options of package.";
+
+/// Usage text of `package`, shown by `cargo emacs package --help`.
+pub const PACKAGE_USAGE: &str = "\
+Build a release Emacs dynamic module and write it as <name>-module-<platform>.<suffix>.
+
+Usage:
+    cargo emacs package [--dir <path>] [--platform <name>] [--zigbuild] [<cargo build options>...]
+
+Options:
+    --dir <path>        Write into <path> instead of <target-directory>/emacs/dist
+    --platform <name>   Platform name in the file name (a-z, 0-9, `-`, `_`); default: derived from
+                        --target, or from the host of `rustc -vV`
+    --zigbuild          Run `cargo zigbuild` instead of `cargo build`
+    all others          Passed to Cargo unchanged (--message-format is not allowed);
+                        --release is added unless --release or --profile is given
+
+Platforms: linux-x86_64, linux-aarch64, macos-x86_64, macos-aarch64, windows-x86_64.";
 
 /// What the command line asks for.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Help,
+    PackageHelp,
     Version,
     Build(BuildArgs),
+    Package(PackageArgs),
+}
+
+/// The arguments of `package`: those of `build` and the tool's own options for packaging.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PackageArgs {
+    /// `--dir`, the target directory and the options for Cargo, which has `--release` added if needed.
+    pub build: BuildArgs,
+    /// Value of `--platform`.
+    pub platform: Option<String>,
+    /// Whether `--zigbuild` was given.
+    pub zigbuild: bool,
 }
 
 /// The arguments of `build`, split into the tool's own and the ones for Cargo.
@@ -50,46 +83,125 @@ pub fn parse_args(args: &[String]) -> Result<Command, String> {
         Some("--version" | "-V") => Ok(Command::Version),
         Some("build") if args[1..].iter().any(|a| a == "--help" || a == "-h") => Ok(Command::Help),
         Some("build") => split_build_args(&args[1..]).map(Command::Build),
+        Some("package") if args[1..].iter().any(|a| a == "--help" || a == "-h") => Ok(Command::PackageHelp),
+        Some("package") => split_package_args(&args[1..]).map(Command::Package),
         Some(other) => Err(format!("unknown subcommand `{other}`")),
     }
 }
 
 /// Split the arguments of `build`.
 pub fn split_build_args(args: &[String]) -> Result<BuildArgs, String> {
-    let mut out = BuildArgs::default();
+    split_args(args, false).map(|p| p.build)
+}
+
+/// Split the arguments of `package` and add `--release` if no profile is chosen.
+pub fn split_package_args(args: &[String]) -> Result<PackageArgs, String> {
+    let mut out = split_args(args, true)?;
+    add_release(&mut out.build.passthrough);
+    Ok(out)
+}
+
+/// Append `--release` unless the options contain `--release` or `--profile` in any form.
+pub fn add_release(options: &mut Vec<String>) {
+    let chosen = options.iter().any(|a| a == "--release" || a == "--profile" || a.starts_with("--profile="));
+    if !chosen {
+        options.push("--release".to_string());
+    }
+}
+
+/// Whether `name` is a valid `--platform` value: non-empty, only `a`-`z`, `0`-`9`, `-` and `_`.
+pub fn valid_platform(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-' | '_'))
+}
+
+/// The triple of the first `--target` option, in either form.
+pub fn target_from_args(options: &[String]) -> Option<String> {
+    let mut iter = options.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--target" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--target=") {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+/// The host triple in the output of `rustc -vV`.
+pub fn host_from_rustc_vv(output: &str) -> Option<String> {
+    let host = output.lines().find_map(|l| l.strip_prefix("host:"))?.trim();
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// The platform name of a target triple. A zigbuild suffix such as `.2.28` is ignored.
+pub fn platform_from_triple(triple: &str) -> Result<&'static str, String> {
+    let base = match triple.split_once('.') {
+        Some((base, rest)) if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit() || c == '.') => base,
+        _ => triple,
+    };
+    match base {
+        "x86_64-unknown-linux-gnu" => Ok("linux-x86_64"),
+        "aarch64-unknown-linux-gnu" => Ok("linux-aarch64"),
+        "x86_64-apple-darwin" => Ok("macos-x86_64"),
+        "aarch64-apple-darwin" => Ok("macos-aarch64"),
+        "x86_64-pc-windows-msvc" | "x86_64-pc-windows-gnu" => Ok("windows-x86_64"),
+        _ => Err(format!("the target `{triple}` has no platform name; give one with `--platform`")),
+    }
+}
+
+/// Split the arguments of `build`, or of `package` if `package` is set, which also takes its own options.
+fn split_args(args: &[String], package: bool) -> Result<PackageArgs, String> {
+    let mut out = PackageArgs::default();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if arg == "--dir" {
+        if package && arg == "--zigbuild" {
+            out.zigbuild = true;
+        } else if package && (arg == "--platform" || arg.starts_with("--platform=")) {
+            let value = match arg.strip_prefix("--platform=") {
+                Some(value) => value,
+                // As for `--dir`, a following option is a forgotten value.
+                None => iter
+                    .next()
+                    .map(String::as_str)
+                    .filter(|v| !v.starts_with('-'))
+                    .ok_or("`--platform` needs a value")?,
+            };
+            if !valid_platform(value) {
+                return Err(format!("`--platform` needs a non-empty value of a-z, 0-9, `-` and `_`, not `{value}`"));
+            }
+            out.platform = Some(value.to_string());
+        } else if arg == "--dir" {
             // A following option is a forgotten value, not a directory name; `--dir=` takes any name.
             let value = iter.next().filter(|v| !v.is_empty() && !v.starts_with('-')).ok_or("`--dir` needs a value")?;
-            out.dir = Some(PathBuf::from(value));
+            out.build.dir = Some(PathBuf::from(value));
         } else if let Some(value) = arg.strip_prefix("--dir=") {
             if value.is_empty() {
                 return Err("`--dir` needs a value".to_string());
             }
-            out.dir = Some(PathBuf::from(value));
+            out.build.dir = Some(PathBuf::from(value));
         } else if arg == "--message-format" || arg.starts_with("--message-format=") {
             return Err("`--message-format` is set by cargo emacs itself and cannot be given".to_string());
         } else if arg == "--manifest-path" {
-            out.passthrough.push(arg.clone());
+            out.build.passthrough.push(arg.clone());
             if let Some(value) = iter.next() {
-                out.manifest_path = Some(value.clone());
-                out.passthrough.push(value.clone());
+                out.build.manifest_path = Some(value.clone());
+                out.build.passthrough.push(value.clone());
             }
         } else if let Some(value) = arg.strip_prefix("--manifest-path=") {
-            out.manifest_path = Some(value.to_string());
-            out.passthrough.push(arg.clone());
+            out.build.manifest_path = Some(value.to_string());
+            out.build.passthrough.push(arg.clone());
         } else if arg == "--target-dir" {
-            out.passthrough.push(arg.clone());
+            out.build.passthrough.push(arg.clone());
             if let Some(value) = iter.next() {
-                out.target_dir = Some(PathBuf::from(value));
-                out.passthrough.push(value.clone());
+                out.build.target_dir = Some(PathBuf::from(value));
+                out.build.passthrough.push(value.clone());
             }
         } else if let Some(value) = arg.strip_prefix("--target-dir=") {
-            out.target_dir = Some(PathBuf::from(value));
-            out.passthrough.push(arg.clone());
+            out.build.target_dir = Some(PathBuf::from(value));
+            out.build.passthrough.push(arg.clone());
         } else {
-            out.passthrough.push(arg.clone());
+            out.build.passthrough.push(arg.clone());
         }
     }
     Ok(out)
@@ -237,6 +349,120 @@ mod tests {
         assert!(parse_args(&args(&["emacs"])).is_err());
         assert!(parse_args(&args(&["emacs", "frobnicate"])).is_err());
         assert!(parse_args(&args(&["build", "--dir"])).is_err());
+    }
+
+    fn package(list: &[&str]) -> PackageArgs {
+        match parse_args(&args(list)).unwrap() {
+            Command::Package(p) => p,
+            other => panic!("not a package: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn package_own_options_are_removed() {
+        let p = package(&["emacs", "package", "--dir", "out", "--platform", "linux-x86_64", "--zigbuild", "-p", "x"]);
+        assert_eq!(p.build.dir, Some(PathBuf::from("out")));
+        assert_eq!(p.platform.as_deref(), Some("linux-x86_64"));
+        assert!(p.zigbuild);
+        assert_eq!(p.build.passthrough, args(&["-p", "x", "--release"]));
+        let p = package(&["package", "--platform=my_plat-1", "--dir=d"]);
+        assert_eq!(p.platform.as_deref(), Some("my_plat-1"));
+        assert_eq!(p.build.dir, Some(PathBuf::from("d")));
+        assert!(!p.zigbuild);
+        assert_eq!(p.build.passthrough, args(&["--release"]));
+    }
+
+    #[test]
+    fn package_reads_manifest_path_and_target_dir() {
+        let p = package(&["package", "--manifest-path", "m", "--target-dir=td"]);
+        assert_eq!(p.build.manifest_path.as_deref(), Some("m"));
+        assert_eq!(p.build.target_dir, Some(PathBuf::from("td")));
+    }
+
+    #[test]
+    fn platform_and_zigbuild_pass_through_in_build() {
+        let b = build(&["build", "--platform", "x", "--zigbuild"]);
+        assert_eq!(b.passthrough, args(&["--platform", "x", "--zigbuild"]));
+    }
+
+    #[test]
+    fn platform_validation() {
+        for good in ["linux-x86_64", "a", "0", "a_b-c9"] {
+            assert!(valid_platform(good), "{good}");
+        }
+        for bad in ["", "Linux", "a b", "a/b", "a.b", "é"] {
+            assert!(!valid_platform(bad), "{bad}");
+        }
+        assert!(parse_args(&args(&["package", "--platform"])).is_err());
+        assert!(parse_args(&args(&["package", "--platform", "--release"])).is_err());
+        assert!(parse_args(&args(&["package", "--platform="])).is_err());
+        assert!(parse_args(&args(&["package", "--platform", ""])).is_err());
+        assert!(parse_args(&args(&["package", "--platform=A/b"])).is_err());
+    }
+
+    #[test]
+    fn package_rejects_message_format_and_shows_help() {
+        assert!(parse_args(&args(&["package", "--message-format=json"])).is_err());
+        assert_eq!(parse_args(&args(&["emacs", "package", "--help"])), Ok(Command::PackageHelp));
+        assert_eq!(parse_args(&args(&["package", "--release", "-h"])), Ok(Command::PackageHelp));
+    }
+
+    #[test]
+    fn release_is_added_unless_a_profile_is_chosen() {
+        let passthrough = |list: &[&str]| package(&[&["package"], list].concat()).build.passthrough;
+        assert_eq!(passthrough(&[]), args(&["--release"]));
+        assert_eq!(passthrough(&["-p", "x"]), args(&["-p", "x", "--release"]));
+        assert_eq!(passthrough(&["--release"]), args(&["--release"]));
+        assert_eq!(passthrough(&["--profile", "dev"]), args(&["--profile", "dev"]));
+        assert_eq!(passthrough(&["--profile=dev"]), args(&["--profile=dev"]));
+    }
+
+    #[test]
+    fn target_is_read_in_both_forms() {
+        assert_eq!(target_from_args(&args(&["--release", "--target", "a-b-c"])), Some("a-b-c".to_string()));
+        assert_eq!(target_from_args(&args(&["--target=x.2.28", "-p", "y"])), Some("x.2.28".to_string()));
+        assert_eq!(target_from_args(&args(&["--release", "--target"])), None);
+        assert_eq!(target_from_args(&args(&["--release", "--target-dir", "t"])), None);
+    }
+
+    #[test]
+    fn rustc_host_is_parsed() {
+        let output =
+            "rustc 1.85.0 (4d91de4e4 2025-02-17)\nbinary: rustc\nhost: x86_64-unknown-linux-gnu\nrelease: 1.85.0\n";
+        assert_eq!(host_from_rustc_vv(output), Some("x86_64-unknown-linux-gnu".to_string()));
+        assert_eq!(host_from_rustc_vv("rustc 1.85.0\nrelease: 1.85.0\n"), None);
+        assert_eq!(host_from_rustc_vv("host:  \n"), None);
+        assert_eq!(host_from_rustc_vv(""), None);
+    }
+
+    #[test]
+    fn platform_table() {
+        for (triple, platform) in [
+            ("x86_64-unknown-linux-gnu", "linux-x86_64"),
+            ("aarch64-unknown-linux-gnu", "linux-aarch64"),
+            ("x86_64-apple-darwin", "macos-x86_64"),
+            ("aarch64-apple-darwin", "macos-aarch64"),
+            ("x86_64-pc-windows-msvc", "windows-x86_64"),
+            ("x86_64-pc-windows-gnu", "windows-x86_64"),
+        ] {
+            assert_eq!(platform_from_triple(triple), Ok(platform), "{triple}");
+        }
+    }
+
+    #[test]
+    fn platform_ignores_zigbuild_suffix() {
+        assert_eq!(platform_from_triple("x86_64-unknown-linux-gnu.2.28"), Ok("linux-x86_64"));
+        assert_eq!(platform_from_triple("aarch64-unknown-linux-gnu.2.17"), Ok("linux-aarch64"));
+        assert!(platform_from_triple("x86_64-unknown-linux-gnu.").is_err());
+        assert!(platform_from_triple("x86_64-unknown-linux-gnu.abc").is_err());
+    }
+
+    #[test]
+    fn unknown_triple_names_triple_and_option() {
+        let err = platform_from_triple("riscv64gc-unknown-linux-gnu").unwrap_err();
+        assert!(err.contains("riscv64gc-unknown-linux-gnu") && err.contains("--platform"), "{err}");
+        assert!(platform_from_triple("").is_err());
+        assert!(platform_from_triple("x86_64-unknown-linux-musl").is_err());
     }
 
     #[test]
