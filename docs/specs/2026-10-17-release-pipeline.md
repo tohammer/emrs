@@ -94,7 +94,7 @@ differences:
    `--platform=<name>` sets the platform name. `--zigbuild` runs
    `cargo zigbuild` instead of `cargo build`. All three are removed before
    the options are passed to Cargo.
-2. **Profile.** If the passed options contain neither `--release` nor
+2. **Profile.** If the passed options contain neither `--release`, `-r` nor
    `--profile` (in any of its forms), the tool adds `--release`.
 3. **Platform.** Determined before the build. Without `--platform`, the
    triple is the value of `--target` (either form) if given, otherwise the
@@ -218,6 +218,7 @@ duration.
 | The triple is not in the table and `--platform` is not given | Message naming the triple and `--platform`; exit status 1; nothing is built |
 | `--platform` without a value, or with characters outside the allowed set | Usage message, exit status 2 |
 | `rustc -vV` fails or has no `host:` line | Message with the error; exit status 1 |
+| The platform was derived (no `--platform`), but a library lies in `<target-dir>/<triple>/<profile>/` with a triple of another platform, because Cargo took the target from `CARGO_BUILD_TARGET` or its configuration | Message naming both platforms and `--target`; exit status 1; nothing is installed |
 | `--zigbuild` and `cargo zigbuild` is not installed | Cargo's error is shown; exit with its status |
 
 In the workflow, every failure fails the run, and with `publish` true nothing

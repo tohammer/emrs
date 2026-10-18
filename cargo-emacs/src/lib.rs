@@ -1,7 +1,7 @@
 //! Logic of `cargo emacs build` and `package` that needs no running Cargo: argument splitting, platform names, module
 //! name resolution and artifact selection from Cargo's JSON messages.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -101,9 +101,10 @@ pub fn split_package_args(args: &[String]) -> Result<PackageArgs, String> {
     Ok(out)
 }
 
-/// Append `--release` unless the options contain `--release` or `--profile` in any form.
+/// Append `--release` unless the options contain `--release`, `-r` or `--profile` in any form.
 pub fn add_release(options: &mut Vec<String>) {
-    let chosen = options.iter().any(|a| a == "--release" || a == "--profile" || a.starts_with("--profile="));
+    let chosen =
+        options.iter().any(|a| a == "--release" || a == "-r" || a == "--profile" || a.starts_with("--profile="));
     if !chosen {
         options.push("--release".to_string());
     }
@@ -126,6 +127,13 @@ pub fn target_from_args(options: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+/// The platform a library was built for, from its directory `<target-dir>/<triple>/<profile>/`. None for a library in
+/// `<target-dir>/<profile>/`, which Cargo builds for the host, or for a triple without a platform name.
+pub fn platform_of_library(library: &Path) -> Option<&'static str> {
+    let triple = library.parent()?.parent()?.file_name()?.to_str()?;
+    platform_from_triple(triple).ok()
 }
 
 /// The host triple in the output of `rustc -vV`.
@@ -412,6 +420,7 @@ mod tests {
         assert_eq!(passthrough(&[]), args(&["--release"]));
         assert_eq!(passthrough(&["-p", "x"]), args(&["-p", "x", "--release"]));
         assert_eq!(passthrough(&["--release"]), args(&["--release"]));
+        assert_eq!(passthrough(&["-r"]), args(&["-r"]));
         assert_eq!(passthrough(&["--profile", "dev"]), args(&["--profile", "dev"]));
         assert_eq!(passthrough(&["--profile=dev"]), args(&["--profile=dev"]));
     }
@@ -445,6 +454,15 @@ mod tests {
         ] {
             assert_eq!(platform_from_triple(triple), Ok(platform), "{triple}");
         }
+    }
+
+    #[test]
+    fn platform_of_library_reads_the_triple_directory() {
+        let lib = |p: &str| platform_of_library(Path::new(p));
+        assert_eq!(lib("/w/target/aarch64-apple-darwin/release/libx.dylib"), Some("macos-aarch64"));
+        assert_eq!(lib("/w/target/x86_64-unknown-linux-gnu/dist/libx.so"), Some("linux-x86_64"));
+        assert_eq!(lib("/w/target/release/libx.so"), None);
+        assert_eq!(lib("/w/target/riscv64gc-unknown-linux-gnu/release/libx.so"), None);
     }
 
     #[test]

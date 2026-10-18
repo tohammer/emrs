@@ -7,7 +7,7 @@ use std::process::{Command as Process, ExitCode, Stdio};
 
 use cargo_emacs::{
     Artifact, BuildArgs, Command, PACKAGE_USAGE, PackageArgs, USAGE, host_from_rustc_vv, parse_args,
-    platform_from_triple, resolve_name, select_artifacts, target_from_args,
+    platform_from_triple, platform_of_library, resolve_name, select_artifacts, target_from_args,
 };
 use serde_json::Value;
 
@@ -36,7 +36,8 @@ fn main() -> ExitCode {
         Ok(Command::Build(build)) => return finish(run_build(&build, None)),
         Ok(Command::Package(package)) => return finish(run_package(&package)),
         Err(message) => {
-            eprintln!("cargo emacs: {message}\n\n{USAGE}");
+            let package = args.iter().find(|a| *a != "emacs").is_some_and(|a| a == "package");
+            eprintln!("cargo emacs: {message}\n\n{}", if package { PACKAGE_USAGE } else { USAGE });
             return ExitCode::from(2);
         }
     }
@@ -76,6 +77,8 @@ fn cargo() -> Process {
 struct Packaging<'a> {
     platform: &'a str,
     zigbuild: bool,
+    /// Whether the platform was derived rather than given with `--platform`, so that the built target must match it.
+    derived: bool,
 }
 
 fn run_build(args: &BuildArgs, packaging: Option<&Packaging>) -> Result<(), Failure> {
@@ -90,6 +93,19 @@ fn run_build(args: &BuildArgs, packaging: Option<&Packaging>) -> Result<(), Fail
         ));
     }
     let installs = plan_installs(&workspace, &artifacts)?;
+    if let Some(p) = packaging.filter(|p| p.derived) {
+        // Cargo can take the target from the environment or its configuration, which the tool does not see.
+        for (_, library) in &installs {
+            if let Some(built) = platform_of_library(library).filter(|built| *built != p.platform) {
+                return Err(Failure::new(format!(
+                    "{} was built for {built}, not {}; Cargo took the target from its configuration or \
+                     CARGO_BUILD_TARGET, so pass it with `--target`",
+                    library.display(),
+                    p.platform
+                )));
+            }
+        }
+    }
     let default_dir = match &args.target_dir {
         Some(target) => target.join("emacs"),
         None => workspace.target_directory.join("emacs"),
@@ -125,7 +141,8 @@ fn run_package(args: &PackageArgs) -> Result<(), Failure> {
             platform_from_triple(&triple).map_err(Failure::new)?.to_string()
         }
     };
-    run_build(&args.build, Some(&Packaging { platform: &platform, zigbuild: args.zigbuild }))
+    let packaging = Packaging { platform: &platform, zigbuild: args.zigbuild, derived: args.platform.is_none() };
+    run_build(&args.build, Some(&packaging))
 }
 
 /// The host triple, from `rustc -vV`.

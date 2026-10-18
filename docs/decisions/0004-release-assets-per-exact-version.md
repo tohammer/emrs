@@ -35,7 +35,8 @@ Emacs has no built-in tool to unpack archives on every platform.
   `<name>-module-<platform>.<ext>`, not an archive. `<platform>` is one of a
   fixed set of names (`linux-x86_64`, `linux-aarch64`, `macos-x86_64`,
   `macos-aarch64`, `windows-x86_64`) and `<ext>` is the platform's module
-  suffix without the dot.
+  suffix without the dot. ADR 0007 removed `macos-x86_64` from this
+  set.
 - The release contains `SHA256SUMS` in the format of `sha256sum`, one line
   per asset. The installer verifies the download against it. The user chose
   this on 2026-10-17.
