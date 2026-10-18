@@ -44,38 +44,29 @@ Design notes from the original brainstorming:
 - Never hand Lisp a pointer into Rust memory. Accessors copy the requested
   part into a Lisp value.
 
-## Prebuilt artifacts and distribution
+## Installer for prebuilt modules
 
-Download of prebuilt module binaries with a compile fallback, a CI action,
-and an installer. `info` already reports the module version, the `emrs`
-version, the protocol and the target triple for diagnostics (spec section 14).
+The release side exists (spec `docs/specs/2026-10-17-release-pipeline.md`):
+`cargo emacs package`, the reusable workflow and the asset layout of ADR
+0004. Missing is the Elisp side, a separate library `emrs-install.el` that
+gives a package its module: one already installed, else the release asset
+for its exact version (checked against `SHA256SUMS`), else a `cargo build`
+in the package's checkout. Decided in ADR 0006: ask before downloading
+(user option always/ask/never), install under
+`<user-emacs-directory>/emrs/modules/<module>/<version>/`, build only from a
+checkout. Still open:
 
-Design notes from the original brainstorming:
-
-- Installing a package from MELPA should not require a Rust toolchain. The
-  installer first uses a module that is already present, then downloads a
-  prebuilt binary for the platform, and only then offers a local `cargo
-  build`.
-- The installer is a separate Elisp library, not part of the runtime.
-- One binary per platform serves all supported Emacs versions: the module
-  API only appends fields, and `emacs_module_init` checks the sizes. The
-  open risk is the operating system, mainly the glibc version a Linux binary
-  requires. Build against a fixed old glibc baseline (for example with
-  `cargo-zigbuild`).
-- Test every artifact against every supported Emacs version with
-  `--module-assertions`, and publish checksums.
+- Map `system-configuration` to the platform names of ADR 0004.
 - On a load failure, report what was detected (Emacs version, platform) and
-  what the artifact requires, instead of the bare loader error.
+  what the file requires (glibc 2.28, the macOS version Rust targets).
+- A command that removes old versions from the user directory.
+- quarry's `quarry-build.el` is the model for the build part.
 
 ## `cargo emacs`: further subcommands and configuration
 
-`cargo emacs build` exists (spec `docs/specs/2026-10-11-cargo-emacs-build.md`).
-Ideas from the original brainstorming that were left out: subcommands `test`,
-`package` and `release`; further keys under `[package.metadata.emacs-module]`;
-platform names such as `linux-x86_64` or a `standard` set instead of raw
-target triples; a reusable GitHub Action that builds and tests the release
-matrix (`cargo-dist` is a model); publishing the tool to crates.io. Revisit
-with the prebuilt artifacts work.
+`cargo emacs build` and `cargo emacs package` exist. Left out: subcommands
+`test` and `release`; further keys under `[package.metadata.emacs-module]`;
+publishing the tool to crates.io. Revisit when module authors ask for them.
 
 ## `cargo emacs build` does not check the module name
 
