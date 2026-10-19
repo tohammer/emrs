@@ -288,7 +288,7 @@ hook.
 
 ## Tasks
 
-- [ ] 1. Write `elisp/emrs-install.el` with registration, platform, lookup,
+- [x] 1. Write `elisp/emrs-install.el` with registration, platform, lookup,
   download with checksum and consent, `emrs-install-ensure` (without the
   build step, which ends in the final `user-error` for now) and
   `emrs-install-load` with the version warning and load errors, plus the
