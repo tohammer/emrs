@@ -170,7 +170,8 @@ BINDINGS is (DIR ROOT) naming the variables for both."
       (emrs-install-register 'emrs-test :version "0.1.0" :url url)
       (let ((file (emrs-install-ensure 'emrs-test)))
         (should (equal file (emrs-install--installed-file 'emrs-test "0.1.0")))
-        (should (file-executable-p file))
+        ;; Emacs on Windows counts only some extensions as executable, not .dll.
+        (unless (eq system-type 'windows-nt) (should (file-executable-p file)))
         (should (equal (emrs-install-test--sha file)
                        (emrs-install-test--sha emrs-install-test--module-file)))
         (should-not (file-exists-p
@@ -466,7 +467,8 @@ BINDINGS is (URL) naming the variable for the base URL of the server."
                      (file-attribute-modification-time (file-attributes marker))
                      mtime))))
     (let ((file (emrs-install--installed-file 'emrs-test "0.1.0")))
-      (should (file-executable-p file))
+      ;; Emacs on Windows counts only some extensions as executable, not .dll.
+      (unless (eq system-type 'windows-nt) (should (file-executable-p file)))
       (should (string-match-p (concat "/emrs-test-module"
                                       (regexp-quote module-file-suffix) "\\'")
                               file))
