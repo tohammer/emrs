@@ -44,24 +44,6 @@ Design notes from the original brainstorming:
 - Never hand Lisp a pointer into Rust memory. Accessors copy the requested
   part into a Lisp value.
 
-## Installer for prebuilt modules
-
-The release side exists (spec `docs/specs/2026-10-17-release-pipeline.md`):
-`cargo emacs package`, the reusable workflow and the asset layout of ADR
-0004. Missing is the Elisp side, a separate library `emrs-install.el` that
-gives a package its module: one already installed, else the release asset
-for its exact version (checked against `SHA256SUMS`), else a `cargo build`
-in the package's checkout. Decided in ADR 0006: ask before downloading
-(user option always/ask/never), install under
-`<user-emacs-directory>/emrs/modules/<module>/<version>/`, build only from a
-checkout. Still open:
-
-- Map `system-configuration` to the platform names of ADR 0004.
-- On a load failure, report what was detected (Emacs version, platform) and
-  what the file requires (glibc 2.28, the macOS version Rust targets).
-- A command that removes old versions from the user directory.
-- quarry's `quarry-build.el` is the model for the build part.
-
 ## `cargo emacs`: further subcommands and configuration
 
 `cargo emacs build` and `cargo emacs package` exist. Left out: subcommands

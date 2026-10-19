@@ -20,6 +20,8 @@ below).
 
 - `emrs/` is the Rust crate.
 - `elisp/emrs.el` is the companion Elisp library (Emacs 30.1 or later).
+- `elisp/emrs-install.el` gets a package its module: installed, downloaded
+  from a release, or built with cargo.
 - `cargo-emacs/` is the build tool (`cargo emacs build`, `cargo emacs package`).
 - `.github/workflows/module-release.yml` is a reusable workflow that
   publishes prebuilt modules.
@@ -106,9 +108,9 @@ Emacs cannot unload a module; restart Emacs to load a new build.
 
 Users of a package should not need a Rust toolchain. emrs defines a layout
 for prebuilt modules on a release and a reusable GitHub workflow that
-produces it. An installer in Emacs that downloads these files is planned
-(`docs/next-steps.md`); until then users can download a file by hand and
-rename it to `<name>-module.<ext>`.
+produces it. `emrs-install.el` downloads these files for the users of a
+package (see "Installing modules for users"); a file can also be downloaded
+by hand and renamed to `<name>-module.<ext>`.
 
 A release of a module is the release tagged `v<version>`, where `<version>`
 is the `version` in the module's `Cargo.toml`. It holds one file per
@@ -127,9 +129,11 @@ SHA256SUMS
 glibc 2.28 and load on Debian 10, RHEL 8, Ubuntu 18.10 and later.
 
 After a release, set the crate version to the next development version
-(for example `1.3.0-dev`). An installer downloads the release that matches
-the version exactly, so users who follow the default branch would otherwise
-get the binary of the previous release for newer Elisp.
+with the suffix `-snapshot` (for example `1.3.0-snapshot`; ADR 0008). The
+installer downloads the release that matches the version exactly and never
+looks for a `-snapshot` release, so users who follow the default branch get
+a local build instead of the binary of the previous release. Emacs rejects
+`-dev` as a version, so do not use it.
 
 ### `cargo emacs package`
 
@@ -200,6 +204,65 @@ renamed to `<name>-module.<ext>`), `EMRS_MODULE_DIR` (its directory, for
 `load-path`), `EMRS_MODULE_NAME`, `EMRS_MODULE_VERSION`, and `EMRS_EL_DIR`
 (the directory of the `emrs.el` that belongs to the emrs version the module
 depends on). The command must not rebuild the module.
+
+## Installing modules for users
+
+`elisp/emrs-install.el` gives a package its module, so that users without
+Rust can use it. A package registers its module once, at top level of its
+main file, and loads it through the installer:
+
+```elisp
+(require 'emrs-install)
+
+(emrs-install-register 'echo-rs
+  :version "0.2.0"          ; the crate version, ADR 0008
+  :url "https://github.com/OWNER/REPO/releases/download"
+  :source (or load-file-name buffer-file-name))
+
+;; where the package needs the module:
+(emrs-install-load 'echo-rs)              ; returns the module handle
+```
+
+| Key | Meaning |
+|---|---|
+| `:version` | Required. The crate version; between releases `X.Y.Z-snapshot` |
+| `:url` | Base URL of the releases; the files of a version are at `<url>/v<version>/` |
+| `:source` | A file of the package; the nearest directory above it with a `Cargo.toml` is the checkout to build from |
+| `:package` | The Cargo package to build, in a workspace with several |
+
+`emrs-install-load` loads the module and returns its handle. If the module
+is not installed yet, it tries these in order:
+
+1. The installed module of this version in
+   `~/.emacs.d/emrs/modules/<module>/<version>/`, or `<module>-module` on
+   `load-path`. A local build that is older than its sources is offered for
+   a rebuild.
+2. The release file for this platform. The user is asked first; the file is
+   checked against `SHA256SUMS`. Skipped for `-snapshot` versions.
+3. A build with cargo in the package's checkout, in the buffer
+   `*emrs-install <module>*`; the user runs the command again when it is
+   done.
+
+If none works, the error says what was tried. After loading, a module that
+reports another version than the registered one gives a warning.
+
+Commands: `M-x emrs-install-module` installs a module again (with a prefix
+argument it builds), `M-x emrs-install-build` builds it, and
+`M-x emrs-install-clean` deletes versions that are no longer used. User
+options (group `emrs-install`): `emrs-install-download` (`ask`, `always`,
+`never`; in batch mode `ask` means `never`), `emrs-install-directory`,
+`emrs-install-timeout`, `emrs-install-cargo-program`.
+
+Package recipes must include both files of emrs, for example
+`:files ("elisp/*.el")` instead of `("elisp/emrs.el")`. A straight or Doom
+recipe can build the module from its checkout during `doom sync`:
+
+```elisp
+:pre-build ((load (expand-file-name "lisp/my-package.el") nil t)
+            (emrs-install-build-sync 'my-module))
+```
+
+`emrs-install-build-sync` never signals; a failure becomes a warning.
 
 ## Platform support
 

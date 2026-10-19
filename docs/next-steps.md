@@ -5,10 +5,11 @@ architecture.md or an ADR.
 
 ## Next
 
-Spec for the installer `emrs-install.el` (backlog "Installer for prebuilt
-modules"), the consuming half of the release pipeline. The decisions of ADR
-0006 are settled; test it against the assets of a real release made with
-`module-release.yml`.
+Adoption of `emrs-install.el` by emrs-dirdiff and quarry, in their own
+repositories (their backlogs list it): register the module, replace their
+build files and loading code with `emrs-install-load`, change their recipes
+to `elisp/*.el`, and move emrs-dirdiff's crate version from `0.2.0-dev` to
+`0.2.0-snapshot` (ADR 0008).
 
 ## Watch out for
 
