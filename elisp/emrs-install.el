@@ -43,6 +43,7 @@
 (defvar url-http-end-of-headers)
 (declare-function emrs-load-module "emrs" (module &optional file))
 (declare-function emrs-module-info "emrs" (module))
+(declare-function emrs--module-file "emrs" (module))
 
 (defgroup emrs-install nil
   "Install prebuilt modules for packages built on emrs."
@@ -622,6 +623,80 @@ warns once if its version differs from the registered one."
                module actual registered
                (or (emrs-install-file module) "unknown"))))
     handle))
+
+;;;; Commands
+
+;;;###autoload
+(defun emrs-install-module (module &optional build)
+  "Install the registered version of MODULE again, ignoring what is installed.
+Download it if possible, else build it from its checkout.  With a
+prefix argument BUILD, build it with cargo (asynchronously)."
+  (interactive (list (emrs-install--read-module) current-prefix-arg))
+  (let ((entry (emrs-install--entry module)))
+    (if build
+        (progn (emrs-install--source-checkout module)
+               (emrs-install-build module)
+               (message "Building the %s module; it is installed when the build ends"
+                        module))
+      (let ((download (emrs-install--download module)))
+        (cond
+         ((car download)
+          (message "%s module %s installed in %s%s" module
+                   (plist-get entry :version)
+                   (abbreviate-file-name (file-name-directory (car download)))
+                   (if (emrs-install--loaded-p module)
+                       "; restart Emacs to use it"
+                     "")))
+         ((emrs-install--checkout module)
+          (message "emrs-install: %s; building instead" (cdr download))
+          (emrs-install-build module)
+          (message "Building the %s module; it is installed when the build ends"
+                   module))
+         (t (user-error "Cannot install the %s module %s\nTried:\n  %s\n  build: no checkout with Cargo.toml found"
+                        module (plist-get entry :version) (cdr download))))))))
+
+(defun emrs-install--loaded-file (module)
+  "Return the file MODULE was loaded from in this Emacs, or nil."
+  (and (emrs-install--loaded-p module)
+       (fboundp 'emrs--module-file)
+       (emrs--module-file (gethash module emrs--modules))))
+
+(defun emrs-install--clean-candidates ()
+  "Return the version directories that `emrs-install-clean' would delete."
+  (let (dirs)
+    (maphash
+     (lambda (module entry)
+       (let* ((root (expand-file-name (symbol-name module)
+                                      emrs-install-directory))
+              (loaded (emrs-install--loaded-file module))
+              (keep (list (plist-get entry :version)
+                          (and loaded (file-in-directory-p loaded root)
+                               (file-name-nondirectory
+                                (directory-file-name
+                                 (file-name-directory
+                                  (file-relative-name loaded root))))))))
+         (when (file-directory-p root)
+           (dolist (dir (directory-files root t directory-files-no-dot-files-regexp))
+             (when (and (file-directory-p dir)
+                        (not (member (file-name-nondirectory dir) keep)))
+               (push dir dirs))))))
+     emrs-install--registry)
+    (sort dirs #'string<)))
+
+;;;###autoload
+(defun emrs-install-clean ()
+  "Delete installed versions of registered modules that are not in use.
+Keep the registered version and the version a loaded module came from.
+Ask once, listing the directories."
+  (interactive)
+  (let ((dirs (emrs-install--clean-candidates)))
+    (if (null dirs)
+        (message "Nothing to clean")
+      (when (yes-or-no-p (format "Delete these directories?\n%s\nDelete them? "
+                                 (mapconcat #'abbreviate-file-name dirs "\n")))
+        (dolist (dir dirs) (delete-directory dir t))
+        (message "Deleted %d director%s" (length dirs)
+                 (if (= (length dirs) 1) "y" "ies"))))))
 
 (provide 'emrs-install)
 ;;; emrs-install.el ends here

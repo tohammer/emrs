@@ -301,7 +301,7 @@ hook.
   passes, and in an interactive Emacs `M-x emrs-install-build` on the
   registered emrs-test module shows the compilation buffer and installs the
   module.
-- [ ] 3. Add `emrs-install-module` and `emrs-install-clean` and their
+- [x] 3. Add `emrs-install-module` and `emrs-install-clean` and their
   tests. *Done when* `tests/run-ert.sh` passes.
 - [x] 4. Manual check against emrs-dirdiff v0.1.0 as described under
   Testing. *Done when* the module loads and reports 0.1.0 in an Emacs

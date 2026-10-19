@@ -349,6 +349,86 @@ BINDINGS is (DIR ROOT) naming the variables for both."
     (let ((err (should-error (emrs-install-ensure 'emrs-test) :type 'user-error)))
       (should (string-match-p "build: no checkout" (cadr err))))))
 
+;;;; Commands
+
+(ert-deftest emrs-install-test-module-download-reinstalls ()
+  (emrs-install-test--with-env (_dir root)
+    (skip-unless (emrs-install-platform))
+    (let ((emrs-install-download 'always))
+      (emrs-install-register 'emrs-test :version "0.1.0"
+                            :url (emrs-install-test--make-release root "0.1.0"))
+      (let ((file (emrs-install--installed-file 'emrs-test "0.1.0")))
+        (make-directory (file-name-directory file) t)
+        (write-region "junk" nil file)
+        (emrs-install-module 'emrs-test)
+        (should (equal (emrs-install-test--sha file)
+                       (emrs-install-test--sha emrs-install-test--module-file)))))))
+
+(ert-deftest emrs-install-test-module-prefix-builds ()
+  (skip-unless (executable-find emrs-install-cargo-program))
+  (emrs-install-test--with-env (_dir _root)
+    (emrs-install-test--register-repo)
+    (emrs-install-module 'emrs-test t)
+    (let ((deadline (+ (float-time) 120)))
+      (while (and (< (float-time) deadline)
+                  (or (get-buffer-process "*emrs-install emrs-test*")
+                      (gethash "*emrs-install emrs-test*" emrs-install--builds)))
+        (accept-process-output nil 0.1)))
+    (should (emrs-install-test--installed-p))
+    (should (file-exists-p
+             (expand-file-name
+              "built-from"
+              (file-name-directory
+               (emrs-install--installed-file 'emrs-test "0.1.0")))))))
+
+(ert-deftest emrs-install-test-module-no-way ()
+  (emrs-install-test--with-env (_dir _root)
+    (emrs-install-register 'emrs-test :version "0.1.0")
+    (should-error (emrs-install-module 'emrs-test) :type 'user-error)
+    (should-error (emrs-install-module 'emrs-test t) :type 'user-error)))
+
+(defun emrs-install-test--make-versions (dir module versions)
+  (dolist (v versions)
+    (make-directory (expand-file-name (format "%s/%s" module v) dir) t)
+    (write-region "" nil (expand-file-name (format "%s/%s/f" module v) dir))))
+
+(ert-deftest emrs-install-test-clean ()
+  (emrs-install-test--with-env (dir _root)
+    (emrs-install-register 'emrs-test :version "0.1.0")
+    (emrs-install-test--make-versions dir "emrs-test" '("0.1.0" "0.0.9" "0.0.8"))
+    (emrs-install-test--make-versions dir "other" '("0.0.1"))
+    (let ((d (lambda (m v) (expand-file-name (format "%s/%s" m v) dir))))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) nil)))
+        (emrs-install-clean))
+      (should (file-directory-p (funcall d "emrs-test" "0.0.9")))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                ((symbol-function 'emrs-install--loaded-file) (lambda (_) nil)))
+        (emrs-install-clean))
+      (should (file-directory-p (funcall d "emrs-test" "0.1.0")))
+      (should-not (file-directory-p (funcall d "emrs-test" "0.0.9")))
+      (should-not (file-directory-p (funcall d "emrs-test" "0.0.8")))
+      (should (file-directory-p (funcall d "other" "0.0.1")))
+      (let (msg asked)
+        (cl-letf (((symbol-function 'yes-or-no-p)
+                   (lambda (&rest _) (setq asked t)))
+                  ((symbol-function 'message)
+                   (lambda (f &rest a) (setq msg (apply #'format f a)))))
+          (emrs-install-clean))
+        (should-not asked)
+        (should (equal msg "Nothing to clean"))))))
+
+(ert-deftest emrs-install-test-clean-keeps-loaded ()
+  (emrs-install-test--with-env (dir _root)
+    (emrs-install-register 'emrs-test :version "0.1.0")
+    (emrs-install-test--make-versions dir "emrs-test" '("0.1.0" "0.0.9" "0.0.8"))
+    (let ((loaded (emrs-install--installed-file 'emrs-test "0.0.9")))
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t))
+                ((symbol-function 'emrs-install--loaded-file)
+                 (lambda (_) loaded)))
+        (emrs-install-clean)))
+    (should (file-directory-p (expand-file-name "emrs-test/0.0.9" dir)))
+    (should-not (file-directory-p (expand-file-name "emrs-test/0.0.8" dir)))))
+
 ;;;; Loading, in a fresh Emacs
 
 (defun emrs-install-test--run (version root)
