@@ -20,8 +20,8 @@ below).
 
 - `emrs/` is the Rust crate.
 - `elisp/emrs.el` is the companion Elisp library (Emacs 30.1 or later).
-- `elisp/emrs-install.el` gets a package its module: installed, downloaded
-  from a release, or built with cargo.
+- `elisp/emrs-install.el` gives a package its module: an installed copy, a
+  release download or a cargo build.
 - `cargo-emacs/` is the build tool (`cargo emacs build`, `cargo emacs package`).
 - `.github/workflows/module-release.yml` is a reusable workflow that
   publishes prebuilt modules.
@@ -130,9 +130,10 @@ glibc 2.28 and load on Debian 10, RHEL 8, Ubuntu 18.10 and later.
 
 After a release, set the crate version to the next development version
 with the suffix `-snapshot` (for example `1.3.0-snapshot`; ADR 0008). The
-installer downloads the release that matches the version exactly and never
-looks for a `-snapshot` release, so users who follow the default branch get
-a local build instead of the binary of the previous release. Emacs rejects
+installer downloads only the release that matches the version exactly, and
+for a `-snapshot` version it does not download at all but builds locally, so
+users who follow the default branch never get the binary of the previous
+release. Emacs rejects
 `-dev` as a version, so do not use it.
 
 ### `cargo emacs package`
@@ -234,14 +235,18 @@ main file, and loads it through the installer:
 is not installed yet, it tries these in order:
 
 1. The installed module of this version in
-   `~/.emacs.d/emrs/modules/<module>/<version>/`, or `<module>-module` on
-   `load-path`. A local build that is older than its sources is offered for
-   a rebuild.
-2. The release file for this platform. The user is asked first; the file is
-   checked against `SHA256SUMS`. Skipped for `-snapshot` versions.
-3. A build with cargo in the package's checkout, in the buffer
-   `*emrs-install <module>*`; the user runs the command again when it is
-   done.
+   `emrs/modules/<module>/<version>/` under `user-emacs-directory`, or
+   `<module>-module` on `load-path`. In an interactive session, a local
+   build that is older than its sources is offered for a rebuild before it
+   is loaded.
+2. The release file for this platform, checked against `SHA256SUMS`. With
+   `emrs-install-download` set to `ask` (the default) the user is asked
+   first, `always` downloads without asking, `never` skips this step.
+   Skipped for `-snapshot` versions.
+3. A build with cargo in the package's checkout. In an interactive session
+   the user is asked first; the build runs in the buffer
+   `*emrs-install <module>*`, and the command stops and has to be run again
+   when the build is done. Not offered in batch mode.
 
 If none works, the error says what was tried. After loading, a module that
 reports another version than the registered one gives a warning.
@@ -254,15 +259,12 @@ options (group `emrs-install`): `emrs-install-download` (`ask`, `always`,
 `emrs-install-timeout`, `emrs-install-cargo-program`.
 
 Package recipes must include both files of emrs, for example
-`:files ("elisp/*.el")` instead of `("elisp/emrs.el")`. A straight or Doom
-recipe can build the module from its checkout during `doom sync`:
+`:files ("elisp/*.el")` instead of `("elisp/emrs.el")`.
 
-```elisp
-:pre-build ((load (expand-file-name "lisp/my-package.el") nil t)
-            (emrs-install-build-sync 'my-module))
-```
-
-`emrs-install-build-sync` never signals; a failure becomes a warning.
+For pre-build steps of package managers, `emrs-install-build-sync` builds a
+registered module and never signals; a failure becomes a warning. How such
+a step finds `emrs-install.el` depends on the package manager and has not
+been tried yet.
 
 ## Platform support
 
@@ -300,7 +302,7 @@ four platforms, without publishing; it can also be started by hand.
   built from. Its code blocks show the state before review; the repository is
   the current source.
 - `docs/specs/`: the specifications of later features, such as
-  `cargo emacs build` and the release pipeline.
+  `cargo emacs build`, the release pipeline and the module installer.
 - `docs/decisions/`: the decisions behind them (ADRs).
 - `docs/architecture.md`: how the system is built now.
 - `docs/backlog.md` and `docs/next-steps.md`: open points and what comes next.
@@ -314,7 +316,8 @@ four platforms, without publishing; it can also be started by hand.
 ## Licence
 
 The Rust crates are licensed under either MIT or Apache-2.0, at your option.
-`elisp/emrs.el` is licensed under GPL-3.0-or-later.
+`elisp/emrs.el` and `elisp/emrs-install.el` are licensed under
+GPL-3.0-or-later.
 
 ## AI Disclaimer
 

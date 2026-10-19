@@ -306,7 +306,7 @@ hook.
 - [x] 4. Manual check against emrs-dirdiff v0.1.0 as described under
   Testing. *Done when* the module loads and reports 0.1.0 in an Emacs
   without cargo.
-- [ ] 5. Documentation: the README section, the `-snapshot` change in the
+- [x] 5. Documentation: the README section, the `-snapshot` change in the
   release section, an `emrs-install.el` row in `docs/architecture.md`, the
   backlog item "Installer for prebuilt modules" removed, and
   `docs/next-steps.md` naming the adoption by quarry and emrs-dirdiff.
