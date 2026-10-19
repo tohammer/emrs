@@ -197,6 +197,158 @@ BINDINGS is (DIR ROOT) naming the variables for both."
                                 (cadr err)))))
     (should-error (emrs-install-ensure 'nonexistent) :type 'user-error)))
 
+;;;; Local build
+
+(defconst emrs-install-test--repo
+  (file-name-as-directory
+   (file-truename (expand-file-name ".." emrs-install-test--elisp-dir)))
+  "The root of this repository.")
+
+(defun emrs-install-test--register-repo ()
+  "Register emrs-test to build from this repository."
+  (emrs-install-register
+   'emrs-test :version "0.1.0" :package "emrs-test-module"
+   :source (expand-file-name "elisp/emrs.el" emrs-install-test--repo)))
+
+(defun emrs-install-test--built-from (file)
+  (with-temp-buffer
+    (insert-file-contents
+     (expand-file-name "built-from" (file-name-directory file)))
+    (buffer-string)))
+
+(ert-deftest emrs-install-test-build-sync ()
+  (skip-unless (executable-find emrs-install-cargo-program))
+  (emrs-install-test--with-env (_dir _root)
+    (emrs-install-test--register-repo)
+    (should (emrs-install-build-sync 'emrs-test))
+    (let ((file (emrs-install--installed-file 'emrs-test "0.1.0")))
+      (should (file-executable-p file))
+      (should (string-match-p (concat "/emrs-test-module"
+                                      (regexp-quote module-file-suffix) "\\'")
+                              file))
+      (should (string-match-p (regexp-quote
+                               (directory-file-name emrs-install-test--repo))
+                              (emrs-install-test--built-from file))))))
+
+(ert-deftest emrs-install-test-build-async ()
+  (skip-unless (executable-find emrs-install-cargo-program))
+  (emrs-install-test--with-env (_dir _root)
+    (emrs-install-test--register-repo)
+    (let ((process (emrs-install-build 'emrs-test))
+          (deadline (+ (float-time) 120)))
+      (should (process-live-p process))
+      (should-error (emrs-install-build 'emrs-test) :type 'user-error)
+      (while (and (< (float-time) deadline)
+                  (or (process-live-p process)
+                      (gethash "*emrs-install emrs-test*"
+                               emrs-install--builds)))
+        (accept-process-output nil 0.1))
+      (should (emrs-install-test--installed-p))
+      (should (file-exists-p
+               (expand-file-name
+                "built-from"
+                (file-name-directory
+                 (emrs-install--installed-file 'emrs-test "0.1.0"))))))))
+
+(ert-deftest emrs-install-test-download-removes-built-from ()
+  (emrs-install-test--with-env (_dir root)
+    (skip-unless (emrs-install-platform))
+    (emrs-install-register 'emrs-test :version "0.1.0"
+                          :url (emrs-install-test--make-release root "0.1.0"))
+    (let ((file (emrs-install--installed-file 'emrs-test "0.1.0")))
+      (make-directory (file-name-directory file) t)
+      (write-region "/old" nil
+                    (expand-file-name "built-from" (file-name-directory file)))
+      (let ((emrs-install-download 'always))
+        (emrs-install-ensure 'emrs-test))
+      (should-not (file-exists-p
+                   (expand-file-name "built-from"
+                                     (file-name-directory file)))))))
+
+(defconst emrs-install-test--metadata
+  (concat "{\"packages\":["
+          "{\"name\":\"other\",\"manifest_path\":\"/nowhere/Cargo.toml\","
+          "\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"lib\"],\"name\":\"other\"}]},"
+          "{\"name\":\"my-mod\",\"manifest_path\":\"%s\","
+          "\"targets\":[{\"kind\":[\"lib\"],\"crate_types\":[\"rlib\"],\"name\":\"x\"},"
+          "{\"kind\":[\"cdylib\"],\"crate_types\":[\"cdylib\"],\"name\":\"my-mod\"}]}]}")
+  "Recorded `cargo metadata' output; %s is the manifest of the second package.")
+
+(ert-deftest emrs-install-test-library-file ()
+  (emrs-install-test--with-env (dir _root)
+    (let* ((checkout (file-name-as-directory (file-truename dir)))
+           (manifest (expand-file-name "Cargo.toml" checkout))
+           (metadata (json-parse-string
+                      (format emrs-install-test--metadata manifest)
+                      :object-type 'alist :array-type 'list)))
+      (write-region "" nil manifest)
+      (let ((system-type 'gnu/linux))
+        (should (equal (emrs-install--library-file metadata checkout nil)
+                       (concat checkout "target/release/libmy_mod"
+                               module-file-suffix)))
+        (should (equal (emrs-install--library-file metadata checkout "my-mod")
+                       (concat checkout "target/release/libmy_mod"
+                               module-file-suffix))))
+      (let ((system-type 'windows-nt))
+        (cl-letf (((symbol-function 'file-truename) #'identity))
+          (should (equal (emrs-install--library-file metadata checkout nil)
+                         (concat checkout "target/release/my_mod"
+                                 module-file-suffix)))))
+      (let ((err (should-error (emrs-install--library-file metadata checkout "other")
+                               :type 'user-error)))
+        (should (string-match-p "other" (cadr err)))
+        (should (string-match-p "crate-type = \\[\"cdylib\"\\]" (cadr err))))
+      (should-error (emrs-install--library-file metadata checkout "missing")
+                    :type 'user-error))))
+
+(ert-deftest emrs-install-test-stale ()
+  (emrs-install-test--with-env (dir _root)
+    (let* ((checkout (file-name-as-directory (expand-file-name "co" dir)))
+           (module (expand-file-name "mod.so" dir))
+           (old (time-subtract nil 1000))
+           (new (time-subtract nil 10)))
+      (make-directory (expand-file-name "src" checkout) t)
+      (write-region "" nil (expand-file-name "Cargo.toml" checkout))
+      (write-region "" nil (expand-file-name "src/lib.rs" checkout))
+      (write-region "" nil module)
+      (set-file-times (expand-file-name "Cargo.toml" checkout) old)
+      (set-file-times (expand-file-name "src/lib.rs" checkout) old)
+      (set-file-times module new)
+      (should-not (emrs-install--stale-p checkout module))
+      (set-file-times module (time-subtract old 10))
+      (should (emrs-install--stale-p checkout module))
+      (set-file-times module new)
+      (write-region "" nil (expand-file-name "src/deep.rs" checkout))
+      (make-directory (expand-file-name "src/a" checkout) t)
+      (write-region "" nil (expand-file-name "src/a/b.rs" checkout))
+      (set-file-times (expand-file-name "src/deep.rs" checkout) old)
+      (set-file-times (expand-file-name "src/a/b.rs" checkout) (time-add new 5))
+      (should (emrs-install--stale-p checkout module)))))
+
+(ert-deftest emrs-install-test-missing-cargo ()
+  (emrs-install-test--with-env (_dir _root)
+    (emrs-install-test--register-repo)
+    (let ((emrs-install-cargo-program "no-such-cargo-program"))
+      (let ((err (should-error (emrs-install-build 'emrs-test)
+                               :type 'user-error)))
+        (should (string-match-p "emrs-install-cargo-program" (cadr err))))
+      (cl-letf (((symbol-function 'display-warning) #'ignore))
+        (should-not (emrs-install-build-sync 'emrs-test))))))
+
+(ert-deftest emrs-install-test-final-error-build-outcome ()
+  (emrs-install-test--with-env (_dir _root)
+    (emrs-install-test--register-repo)
+    (let ((err (should-error (emrs-install-ensure 'emrs-test) :type 'user-error)))
+      (should (string-match-p "build: not offered in batch mode" (cadr err))))
+    (let ((noninteractive nil))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+        (let ((err (should-error (emrs-install-ensure 'emrs-test)
+                                 :type 'user-error)))
+          (should (string-match-p "build: declined" (cadr err))))))
+    (emrs-install-register 'emrs-test :version "0.1.0")
+    (let ((err (should-error (emrs-install-ensure 'emrs-test) :type 'user-error)))
+      (should (string-match-p "build: no checkout" (cadr err))))))
+
 ;;;; Loading, in a fresh Emacs
 
 (defun emrs-install-test--run (version root)

@@ -295,7 +295,7 @@ hook.
   tests for these parts. *Done when* `tests/run-ert.sh` passes with the new
   tests, the byte compiler reports no warnings for the file, and
   `checkdoc` reports nothing.
-- [ ] 2. Add the local build (`emrs-install-build`,
+- [x] 2. Add the local build (`emrs-install-build`,
   `emrs-install-build-sync`, the stale check, step 3 of
   `emrs-install-ensure`) and its tests. *Done when* `tests/run-ert.sh`
   passes, and in an interactive Emacs `M-x emrs-install-build` on the
@@ -303,7 +303,7 @@ hook.
   module.
 - [ ] 3. Add `emrs-install-module` and `emrs-install-clean` and their
   tests. *Done when* `tests/run-ert.sh` passes.
-- [ ] 4. Manual check against emrs-dirdiff v0.1.0 as described under
+- [x] 4. Manual check against emrs-dirdiff v0.1.0 as described under
   Testing. *Done when* the module loads and reports 0.1.0 in an Emacs
   without cargo.
 - [ ] 5. Documentation: the README section, the `-snapshot` change in the

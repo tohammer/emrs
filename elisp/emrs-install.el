@@ -34,6 +34,9 @@
 
 (require 'url)
 (require 'subr-x)
+(require 'compile)
+(require 'seq)
+(require 'json)
 
 (defvar emrs--modules)
 (defvar url-http-response-status)
@@ -194,19 +197,26 @@ Signal `emrs-install--fetch-failed' with a reason on failure."
                'no-conversion))
           (kill-buffer buffer))))))
 
-(defun emrs-install--install (module version bytes)
-  "Install BYTES as the file of MODULE of VERSION and return its path.
-Write a temporary file in the target directory and rename it."
+(defun emrs-install--place (module version write built-from)
+  "Install MODULE of VERSION by calling WRITE with a temporary file name.
+Write a temporary file in the target directory, set its mode to 0755
+and rename it.  BUILT-FROM is the checkout to record in the file
+`built-from' next to the module, or nil to remove that file.  Return
+the path of the module."
   (let* ((target (emrs-install--installed-file module version))
          (dir (file-name-directory target))
+         (marker (expand-file-name "built-from" dir))
          temp)
     (condition-case err
         (progn
           (make-directory dir t)
           (setq temp (make-temp-file (expand-file-name ".emrs-install-" dir)))
-          (let ((coding-system-for-write 'no-conversion))
-            (write-region bytes nil temp nil 'silent))
+          (funcall write temp)
           (set-file-modes temp #o755)
+          (if built-from
+              (let ((coding-system-for-write 'utf-8))
+                (write-region built-from nil marker nil 'silent))
+            (when (file-exists-p marker) (delete-file marker)))
           (rename-file temp target t)
           target)
       (file-error
@@ -215,6 +225,23 @@ Write a temporary file in the target directory and rename it."
                    (if (eq system-type 'windows-nt)
                        " (a loaded module cannot be replaced before a restart)"
                      ""))))))
+
+(defun emrs-install--install (module version bytes)
+  "Install BYTES as the file of MODULE of VERSION and return its path.
+A downloaded module has no file `built-from'."
+  (emrs-install--place
+   module version
+   (lambda (temp)
+     (let ((coding-system-for-write 'no-conversion))
+       (write-region bytes nil temp nil 'silent)))
+   nil))
+
+(defun emrs-install--install-library (module version library checkout)
+  "Install the built LIBRARY as MODULE of VERSION and return its path.
+CHECKOUT is recorded in the file `built-from'."
+  (emrs-install--place module version
+                       (lambda (temp) (copy-file library temp t))
+                       checkout))
 
 (defun emrs-install--consent (module version platform url)
   "Return non-nil if the user allows downloading MODULE of VERSION from URL.
@@ -273,6 +300,264 @@ checksum mismatch."
              (message "emrs-install: %s" text)
              (cons nil text))))))))
 
+;;;; Local build
+
+(defvar emrs--modules)
+
+(defvar emrs-install--builds (make-hash-table :test 'equal)
+  "Running asynchronous builds: (MODULE VERSION CHECKOUT LIBRARY) by buffer name.")
+
+(defun emrs-install--loaded-p (module)
+  "Return non-nil if MODULE is loaded in this Emacs."
+  (and (boundp 'emrs--modules) (hash-table-p emrs--modules)
+       (gethash module emrs--modules)
+       t))
+
+(defun emrs-install--buffer-name (module)
+  "Return the name of the build buffer of MODULE."
+  (format "*emrs-install %s*" module))
+
+(defun emrs-install--program ()
+  "Return the full name of the cargo program, or signal a `user-error'."
+  (or (executable-find emrs-install-cargo-program)
+      (user-error "Program `%s' not found; install Rust or set `emrs-install-cargo-program'"
+                  emrs-install-cargo-program)))
+
+(defun emrs-install--build-arguments (module checkout)
+  "Return the arguments of the cargo command that builds MODULE in CHECKOUT.
+The target directory is explicit, so neither CARGO_TARGET_DIR nor the
+cargo configuration can move the library."
+  (let ((package (plist-get (gethash module emrs-install--registry) :package)))
+    (append (list "build" "--release" "--target-dir"
+                  (expand-file-name "target" checkout))
+            (and package (list "-p" package)))))
+
+(defun emrs-install--library-file (metadata checkout package)
+  "Return the library file that building PACKAGE in CHECKOUT produces.
+METADATA is the parsed output of `cargo metadata' (alists and lists).
+PACKAGE is a package name, or nil for the package whose manifest is the
+Cargo.toml of CHECKOUT.  Signal a `user-error' if there is no cdylib."
+  (let* ((manifest (file-truename (expand-file-name "Cargo.toml" checkout)))
+         (pkg (seq-find
+               (lambda (p)
+                 (if package
+                     (equal (alist-get 'name p) package)
+                   (let ((path (alist-get 'manifest_path p)))
+                     (and path (file-exists-p path)
+                          (equal (file-truename path) manifest)))))
+               (alist-get 'packages metadata)))
+         (name (or package "the package in Cargo.toml"))
+         (target (and pkg
+                      (seq-find
+                       (lambda (tg)
+                         (or (member "cdylib" (alist-get 'kind tg))
+                             (member "cdylib" (alist-get 'crate_types tg))))
+                       (alist-get 'targets pkg)))))
+    (unless pkg
+      (user-error "Cargo knows no package %s in %s; check :package of `emrs-install-register'"
+                  name checkout))
+    (unless target
+      (user-error "Package %s has no cdylib target; add crate-type = [\"cdylib\"] to its [lib] section"
+                  (alist-get 'name pkg)))
+    (expand-file-name
+     (concat "target/release/"
+             (if (eq system-type 'windows-nt) "" "lib")
+             (replace-regexp-in-string "-" "_" (alist-get 'name target))
+             module-file-suffix)
+     checkout)))
+
+(defun emrs-install--library (module checkout program)
+  "Return the library file of MODULE built in CHECKOUT, using cargo PROGRAM.
+Run `cargo metadata'; signal a `user-error' if that fails."
+  (let ((package (plist-get (gethash module emrs-install--registry) :package))
+        (default-directory checkout)
+        metadata)
+    (with-temp-buffer
+      (let ((status (call-process program nil (list t nil) nil
+                                  "metadata" "--no-deps" "--format-version" "1")))
+        (unless (eql status 0)
+          (user-error "`%s metadata' failed in %s" program checkout))
+        (goto-char (point-min))
+        (setq metadata (condition-case nil
+                           (json-parse-buffer :object-type 'alist
+                                              :array-type 'list)
+                         (error (user-error "`%s metadata' gave no JSON in %s"
+                                            program checkout))))))
+    (emrs-install--library-file metadata checkout package)))
+
+(defun emrs-install--install-built (module checkout library)
+  "Install LIBRARY built in CHECKOUT as the registered version of MODULE.
+Return the installed file; signal a `user-error' if LIBRARY is missing."
+  (let ((version (plist-get (emrs-install--entry module) :version)))
+    (unless (file-exists-p library)
+      (user-error "Cargo produced no %s; the package needs crate-type = [\"cdylib\"]"
+                  library))
+    (emrs-install--install-library module version library checkout)))
+
+(defun emrs-install--source-checkout (module)
+  "Return the checkout of MODULE or signal a `user-error'."
+  (or (emrs-install--checkout module)
+      (user-error "No checkout with Cargo.toml found for the %s module; see :source of `emrs-install-register'"
+                  module)))
+
+(defun emrs-install--read-module ()
+  "Read the name of a registered module."
+  (let (names)
+    (maphash (lambda (k _) (push (symbol-name k) names)) emrs-install--registry)
+    (unless names (user-error "No module is registered"))
+    (intern (completing-read "Module: " (sort names #'string<) nil t))))
+
+(defun emrs-install--built-message (module)
+  "Return the message that says MODULE was built."
+  (format "%s module built%s" module
+          (if (emrs-install--loaded-p module)
+              "; restart Emacs to use it"
+            "")))
+
+(defun emrs-install--build-finished (buffer message)
+  "Install the module when the build in BUFFER ended with MESSAGE.
+Meant for `compilation-finish-functions'; it ignores other buffers."
+  (let* ((name (buffer-name buffer))
+         (info (gethash name emrs-install--builds)))
+    (when info
+      (remhash name emrs-install--builds)
+      (pcase-let ((`(,module ,checkout ,library) info))
+        (if (not (equal message "finished\n"))
+            (message "%s module build failed (see %s)" module name)
+          (condition-case err
+              (progn (emrs-install--install-built module checkout library)
+                     (message "%s" (emrs-install--built-message module)))
+            (error (message "%s module build failed: %s" module
+                            (error-message-string err)))))))))
+
+(add-hook 'compilation-finish-functions #'emrs-install--build-finished)
+
+;;;###autoload
+(defun emrs-install-build (module)
+  "Build the registered MODULE with cargo, asynchronously.
+The output goes to the buffer `*emrs-install MODULE*'.  On success the
+module is installed as its registered version; a running Emacs needs a
+restart to use a rebuilt module.  Return the build process."
+  (interactive (list (emrs-install--read-module)))
+  (emrs-install--entry module)
+  (let ((name (emrs-install--buffer-name module)))
+    (when (get-buffer-process name)
+      (user-error "The %s module is being built (see %s)" module name))
+    (let* ((checkout (emrs-install--source-checkout module))
+           (program (emrs-install--program))
+           (library (emrs-install--library module checkout program))
+           (default-directory checkout)
+           (buffer (compilation-start
+                    (mapconcat #'shell-quote-argument
+                               (cons program
+                                     (emrs-install--build-arguments
+                                      module checkout))
+                               " ")
+                    'compilation-mode
+                    (lambda (_mode) name))))
+      (puthash name (list module checkout library) emrs-install--builds)
+      (get-buffer-process buffer))))
+
+(defun emrs-install--output-tail (buffer &optional lines)
+  "Return the last LINES (default 30) lines of BUFFER."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-max))
+      (forward-line (- (or lines 30)))
+      (string-trim (buffer-substring-no-properties (point) (point-max))))))
+
+;;;###autoload
+(defun emrs-install-build-sync (module)
+  "Build the registered MODULE with cargo, waiting for it to finish.
+Never signal: a failure becomes a warning.  In batch mode the warning
+includes the end of the build output.  Return non-nil on success."
+  (condition-case err
+      (let* ((checkout (emrs-install--source-checkout module))
+             (program (emrs-install--program))
+             (library (emrs-install--library module checkout program))
+             (default-directory checkout)
+             (name (emrs-install--buffer-name module))
+             buffer status)
+        (when (get-buffer-process name)
+          (user-error "The %s module is being built (see %s)" module name))
+        (when (get-buffer name) (kill-buffer name))
+        (setq buffer (get-buffer-create name))
+        (setq status (apply #'call-process program nil buffer nil
+                            (emrs-install--build-arguments module checkout)))
+        (unless (eql status 0)
+          (if noninteractive
+              (error "The build failed:\n%s" (emrs-install--output-tail buffer))
+            (error "The build failed (see %s)" (buffer-name buffer))))
+        (emrs-install--install-built module checkout library)
+        (message "%s" (emrs-install--built-message module))
+        t)
+    (error
+     (display-warning
+      'emrs-install
+      (format "Cannot build the %s module: %s" module
+              (error-message-string err)))
+     nil)))
+
+;;;; Staleness
+
+(defun emrs-install--stale-p (checkout file)
+  "Return non-nil if a source file in CHECKOUT is newer than FILE.
+The sources are the .rs files below src/, build.rs, Cargo.toml and
+Cargo.lock."
+  (let ((sources (append
+                  (let ((src (expand-file-name "src" checkout)))
+                    (and (file-directory-p src)
+                         (directory-files-recursively src "\\.rs\\'")))
+                  (mapcar (lambda (f) (expand-file-name f checkout))
+                          '("build.rs" "Cargo.toml" "Cargo.lock")))))
+    (seq-some (lambda (source)
+                (and (file-exists-p source)
+                     (file-newer-than-file-p source file)))
+              sources)))
+
+(defun emrs-install--built-from (file)
+  "Return the checkout recorded next to the module FILE, or nil."
+  (let ((marker (expand-file-name "built-from" (file-name-directory file))))
+    (when (file-readable-p marker)
+      (let ((dir (string-trim
+                  (with-temp-buffer
+                    (let ((coding-system-for-read 'utf-8))
+                      (insert-file-contents marker))
+                    (buffer-string)))))
+        (and (file-directory-p dir) dir)))))
+
+(defun emrs-install--start-build (module)
+  "Start the build of MODULE and tell the user to run the command again."
+  (emrs-install-build module)
+  (user-error "Building the %s module; run the command again when it is done"
+              module))
+
+(defun emrs-install--present (module version file)
+  "Return FILE, the file found for MODULE of VERSION, or rebuild it.
+If FILE is a local build older than its sources, ask whether to build
+it again (interactive sessions only)."
+  (let ((checkout (and (equal file (emrs-install--installed-file module version))
+                       (emrs-install--built-from file))))
+    (when (and checkout
+               (not noninteractive)
+               (not (emrs-install--loaded-p module))
+               (emrs-install--checkout module)
+               (emrs-install--stale-p checkout file)
+               (y-or-n-p (format "The %s module is older than its sources.  Rebuild it now with cargo? "
+                                 module)))
+      (emrs-install--start-build module))
+    file))
+
+(defun emrs-install--offer-build (module version)
+  "Offer to build MODULE of VERSION.  Return a note about the outcome.
+When the user agrees, start the build and signal a `user-error'."
+  (cond ((null (emrs-install--checkout module))
+         "build: no checkout with Cargo.toml found")
+        (noninteractive "build: not offered in batch mode")
+        ((y-or-n-p (format "Build the %s module %s with cargo? " module version))
+         (emrs-install--start-build module))
+        (t "build: declined")))
+
 ;;;; Ensure and load
 
 (defun emrs-install-ensure (module)
@@ -281,10 +566,12 @@ Signal a `user-error' if nothing works."
   (let* ((entry (emrs-install--entry module))
          (version (plist-get entry :version))
          (platform (emrs-install-platform))
-         (download nil))
-    (or (emrs-install-file module)
+         (download nil)
+         (build nil)
+         (found (emrs-install-file module)))
+    (or (and found (emrs-install--present module version found))
         (car (setq download (emrs-install--download module)))
-        ;; Step 3, the local build, goes here.
+        (progn (setq build (emrs-install--offer-build module version)) nil)
         (user-error
          "No %s module %s available for %s.\nTried:\n  %s\nWays out: M-x emrs-install-module, see the README of the package, or install %s-module%s on `load-path'"
          module version
@@ -297,8 +584,7 @@ Signal a `user-error' if nothing works."
                           (file-name-directory
                            (emrs-install--installed-file module version)))))
            (list (cdr download))
-           (unless (emrs-install--checkout module)
-             (list "build: no checkout with Cargo.toml found")))
+           (list build))
           "\n  ")
          module module-file-suffix))))
 
