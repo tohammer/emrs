@@ -1,6 +1,6 @@
 # Installer for prebuilt modules
 
-Status: approved
+Status: implemented
 Date: 2026-10-19
 
 ## Purpose
@@ -318,3 +318,20 @@ hook.
   backlog item "Installer for prebuilt modules" removed, and
   `docs/next-steps.md` naming the adoption by quarry and emrs-dirdiff.
   *Done when* the doc-checker reports nothing stale.
+
+## Changes during implementation
+
+The text above describes the result. It differs from the approved draft in
+these points, all from the review:
+
+- Downloads use `url-retrieve` with an idle timeout instead of
+  `url-retrieve-synchronously`, whose timeout leaves the connection running,
+  and do not keep connections alive.
+- Registration also checks the module name and rejects plain `http://`.
+- `built-from` has a second line, the package directory, so the stale check
+  works for workspace members; it changes only after the module file is in
+  place, and a built module carries the start time of its build.
+- `cargo metadata` problems stop `emrs-install-build` before the build
+  starts.
+- The README leaves the pre-build step of package managers open instead of
+  giving an untried snippet.

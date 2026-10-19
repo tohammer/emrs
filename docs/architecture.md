@@ -113,5 +113,9 @@ Emacs.
   newer for a plain `cargo build` on Ubuntu 24.04). zigbuild with
   `<triple>.2.28` keeps it at 2.28; the release workflow checks this with
   `readelf` (ADR 0005).
+- `url-retrieve-synchronously` returns nil on its timeout but leaves the
+  connection and its buffer running, and url.el keeps HTTP connections
+  alive by default. `emrs-install.el` therefore waits on `url-retrieve`
+  itself and binds `url-http-attempt-keepalives` to nil.
 - `copy_string_contents` returns the raw bytes of unibyte strings, including
   bytes above 127. No fallback is needed.
