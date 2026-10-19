@@ -72,13 +72,14 @@ A package registers its module once, at top level of its main file:
 | Key | Required | Meaning |
 |---|---|---|
 | `:version` | yes | Module version, equal to the crate version and valid for `version-to-list` (ADR 0008) |
-| `:url` | no | Base URL of the releases; the files of a version are at `<url>/v<version>/<file>` (ADR 0004). Without it, nothing is downloaded |
+| `:url` | no | Base URL of the releases, `https://` or `file:`; the files of a version are at `<url>/v<version>/<file>` (ADR 0004). Without it, nothing is downloaded. Plain `http://` is rejected, because `SHA256SUMS` comes from the same place and would give no integrity |
 | `:source` | no | A file of the package. The checkout is the nearest directory above the true name of this file (of the `.el` next to a `.elc`) that contains `Cargo.toml`. Without it, or without such a directory, nothing is built |
 | `:package` | no | Cargo package to build (`-p`), for a workspace with several packages |
 
 The module symbol is the name given to `emrs::module!`. Registering again
 replaces the entry. `emrs-install-register` signals an error for a missing
-or invalid `:version`.
+or invalid `:version`, for a module name outside `[A-Za-z0-9][A-Za-z0-9._+-]*`
+or containing `..` (it becomes a directory name), and for an `http://` URL.
 
 ### Files
 
@@ -87,8 +88,12 @@ or invalid `:version`.
 - A module of a version lives at
   `<directory>/<module>/<version>/<module>-module<module-file-suffix>`
   (ADR 0006).
-- A locally built module has a file `built-from` next to it that holds the
-  absolute path of the checkout. A downloaded one has none.
+- A locally built module has a file `built-from` next to it with two
+  lines: the absolute path of the checkout and the directory of the built
+  package (different in a workspace). A downloaded one has none. The marker
+  is written or removed only after the module file was renamed into place.
+- A locally built module gets the modification time of the moment its build
+  started, so source changes during the build count as newer.
 - Every installation writes a temporary file in the target directory, sets
   its mode to 0755 and renames it over the target, so a loaded module keeps
   a valid file.
@@ -126,8 +131,8 @@ for this Emacs, or nil:
    compares modification times: if a source file is newer than the module,
    it asks "The <module> module is older than its sources. Rebuild it now
    with cargo?". Yes starts the build (step 3); no uses the old file. The
-   sources are the `*.rs` files below `src/` and `build.rs`, `Cargo.toml`
-   and `Cargo.lock` of the checkout.
+   sources are the `*.rs` files below `src/`, `build.rs` and `Cargo.toml` of
+   the package directory, and `Cargo.lock` of the checkout.
 2. **Download**, if `:url` is set, the version has no `-snapshot` suffix and
    the platform is known.
    - Consent comes from `emrs-install-download`: `ask` (default) asks
@@ -136,8 +141,9 @@ for this Emacs, or nil:
      `never`.
    - The installer fetches `<url>/v<version>/SHA256SUMS` and then
      `<url>/v<version>/<module>-module-<platform><module-file-suffix>` with
-     `url-retrieve-synchronously`, each within `emrs-install-timeout`
-     seconds (default 60), showing a message while it runs. A response other
+     `url-retrieve` and a wait loop, showing a message while it runs. A
+     transfer that receives no data for `emrs-install-timeout` seconds
+     (default 60) is stopped and its connection closed. A response other
      than 200 for `http` and `https`, or a missing file for `file`, is a
      failure.
    - `SHA256SUMS` lines have the form `<64 hex digits>`, two spaces or a
@@ -224,9 +230,9 @@ checkout ([ADR 0009](../decisions/0009-installer-builds-with-plain-cargo.md)).
 
 A section "Installing modules for users" for package authors: the
 registration form, `emrs-install-load`, the recipe change to `elisp/*.el`,
-a pre-build form for straight and Doom
-(`(emrs-install-build-sync 'MODULE)` after loading the package's main
-file), and the user options. The release section changes `1.3.0-dev` to
+`emrs-install-build-sync` for pre-build steps (how such a step finds
+`emrs-install.el` is left to the first package that uses it), and the user
+options. The release section changes `1.3.0-dev` to
 `1.3.0-snapshot` and links ADR 0008.
 
 ## Error handling
@@ -237,13 +243,14 @@ file), and the user options. The release section changes `1.3.0-dev` to
 | Module not registered | `user-error` naming it and `emrs-install-register` |
 | Unknown platform | No download; build or final `user-error` with `system-configuration` |
 | User declines the download | Go on to the build step |
-| Network error, timeout, HTTP status other than 200 | Message with URL and status; go on to the build step |
+| Network error, timeout, HTTP status other than 200 | Message with the URL of the file that failed and the reason; go on to the build step |
 | Checksum line missing for the file | Like a failed download |
 | Checksum mismatch | `user-error` with file and both checksums; nothing installed; no build offered |
 | Install directory not writable, rename fails | `user-error` with path and system error; temporary file removed. On Windows the message adds that a loaded module cannot be replaced before a restart |
 | Cargo not found | `user-error` naming `emrs-install-cargo-program` |
 | Build fails | Asynchronous: message pointing to the compilation buffer. Synchronous: warning, with the output tail in batch mode |
-| `cargo metadata` finds no cdylib, or the library is missing after the build | `user-error` (asynchronous: message) naming the package and `crate-type = ["cdylib"]` |
+| `cargo metadata` fails or finds no cdylib | `user-error` before the build starts, with Cargo's error output or naming the package and `crate-type = ["cdylib"]` |
+| The library is missing after the build | Asynchronous: message; synchronous: warning; naming the library file |
 | Loaded module reports another version | Warning, once per module |
 | Loading fails | `user-error` with the details listed under Loading |
 

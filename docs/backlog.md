@@ -91,6 +91,22 @@ Origin: review of the release pipeline (spec of 2026-10-17), 2026-10-18.
   created) has not run on GitHub yet; the first release of a module whose
   tag has no release exercises it.
 
+## Installer: deferred review findings
+
+Origin: review of `emrs-install.el` (spec of 2026-10-19), 2026-10-19.
+Deferred as untested territory rather than known defects; revisit when a
+package adopts the installer or on a user report.
+
+- Windows and macOS were not tried by hand; the ERT suite runs there in CI
+  only (Windows best effort). The `file:///C:/...` handling is unit-tested
+  on Linux only.
+- How a package manager's pre-build step finds `emrs-install.el` is open
+  (README); the first adopting package settles it.
+- Not covered by tests: two modules building at the same time, an error
+  inside the compilation finish hook, `load-file-name` under native
+  compilation (`.eln`), HTTPS certificate prompts in batch mode, non-ASCII
+  paths in `file:` URLs.
+
 ## Pull-style streams and overflow policies
 
 Consumer-driven stream consumption, and drop or coalesce policies as

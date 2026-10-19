@@ -41,6 +41,7 @@
 (defvar emrs--modules)
 (defvar url-http-response-status)
 (defvar url-http-end-of-headers)
+(defvar url-http-attempt-keepalives)
 (declare-function emrs-load-module "emrs" (module &optional file))
 (declare-function emrs-module-info "emrs" (module))
 (declare-function emrs--module-file "emrs" (module))
@@ -64,7 +65,7 @@ In batch mode `ask' counts as `never'."
                  (const :tag "Never" never)))
 
 (defcustom emrs-install-timeout 60
-  "Seconds to wait for each file of a download."
+  "Seconds a download may go without receiving data before it is stopped."
   :type 'natnum)
 
 (defcustom emrs-install-cargo-program "cargo"
@@ -84,12 +85,28 @@ In batch mode `ask' counts as `never'."
 KEYS are :version (required, the module version as a string, equal
 to the crate version), :url (base URL of the releases), :source (a
 file of the package, to find its checkout) and :package (the Cargo
-package to build).  Registering again replaces the entry."
-  (let ((version (plist-get keys :version)))
+package to build).  The name of MODULE consists of letters, digits,
+`.', `_', `+' and `-'.  The :url must start with https:// or file:,
+since the checksums come from the same place as the module.
+Registering again replaces the entry."
+  (unless (and (symbolp module)
+               (string-match-p "\\`[A-Za-z0-9][A-Za-z0-9._+-]*\\'"
+                               (symbol-name module))
+               (not (string-search ".." (symbol-name module))))
+    (error "Module %S: the name must be letters, digits, `.', `_', `+' and `-', start with a letter or digit and not contain `..'"
+           module))
+  (let ((version (plist-get keys :version))
+        (url (plist-get keys :url)))
     (unless (and (stringp version)
                  (ignore-errors (consp (version-to-list version))))
       (error "Module %s: :version must be a version string, got %S"
-             module version)))
+             module version))
+    (unless (or (null url)
+                (and (stringp url)
+                     (or (string-prefix-p "https://" url)
+                         (string-prefix-p "file:" url))))
+      (error "Module %s: :url must start with https:// or file:, got %S"
+             module url)))
   (puthash module (copy-sequence keys) emrs-install--registry)
   module)
 
@@ -167,65 +184,135 @@ MODULE-module on `load-path'."
 
 (define-error 'emrs-install--fetch-failed "Download failed")
 
+(defun emrs-install--fetch-fail (url reason)
+  "Signal `emrs-install--fetch-failed' for URL with the string REASON."
+  (signal 'emrs-install--fetch-failed (list url reason)))
+
+(defun emrs-install--file-url-name (url)
+  "Return the local file name of the file: URL.
+On Windows, file:///C:/dir/file names C:/dir/file."
+  (let ((file (url-unhex-string (url-filename (url-generic-parse-url url)))))
+    (if (and (memq system-type '(windows-nt ms-dos))
+             (string-match-p "\\`/[A-Za-z]:" file))
+        (substring file 1)
+      file)))
+
+(defun emrs-install--kill-retrieval (buffer)
+  "Delete the process of the url.el BUFFER and kill BUFFER."
+  (when (buffer-live-p buffer)
+    (let ((process (get-buffer-process buffer)))
+      (when process (delete-process process)))
+    (let (kill-buffer-query-functions)
+      (kill-buffer buffer))))
+
+(defun emrs-install--retrieve (url)
+  "Retrieve URL with `url-retrieve' and return the response body.
+Wait until the callback runs; stop when no data arrives for
+`emrs-install-timeout' seconds.  Kill the buffers of the transfer.
+Signal `emrs-install--fetch-failed' on failure.  Connections are not
+kept alive, so nothing stays open after the transfer."
+  (let* ((url-http-attempt-keepalives nil)
+         (done nil)
+         (status nil)
+         (data-buffer nil)
+         (buffer (condition-case err
+                     (url-retrieve url
+                                   (lambda (s)
+                                     (setq status s
+                                           data-buffer (current-buffer)
+                                           done t))
+                                   nil t t)
+                   (error (emrs-install--fetch-fail
+                           url (error-message-string err))))))
+    (unless buffer
+      (emrs-install--fetch-fail url "no response"))
+    (unwind-protect
+        (let ((size -1)
+              (deadline nil))
+          (while (not done)
+            ;; A redirect continues in another buffer.
+            (let ((next (buffer-local-value 'url-redirect-buffer buffer)))
+              (when (and next (not (eq next buffer)) (buffer-live-p next))
+                (emrs-install--kill-retrieval buffer)
+                (setq buffer next size -1)))
+            (let ((now (buffer-size buffer)))
+              (unless (eql now size)
+                (setq size now
+                      deadline (+ (float-time) emrs-install-timeout))))
+            (when (> (float-time) deadline)
+              (emrs-install--fetch-fail
+               url (format "no data for %s seconds" emrs-install-timeout)))
+            (let ((process (get-buffer-process buffer)))
+              (when (and process
+                         (memq (process-status process)
+                               '(closed exit signal failed))
+                         (not done))
+                ;; Let a sentinel run the callback, else give up.
+                (accept-process-output nil 0)
+                (unless done
+                  (emrs-install--fetch-fail url "connection closed"))))
+            (unless done (accept-process-output nil 0.05)))
+          (with-current-buffer data-buffer
+            (let ((err (plist-get status :error)))
+              (when err
+                (emrs-install--fetch-fail url (error-message-string err))))
+            (let ((code (and (boundp 'url-http-response-status)
+                             url-http-response-status)))
+              (unless (eql code 200)
+                (emrs-install--fetch-fail
+                 url (if code (format "HTTP status %s" code)
+                       "no HTTP response"))))
+            (set-buffer-multibyte nil)
+            (buffer-substring-no-properties
+             (1+ url-http-end-of-headers) (point-max))))
+      (emrs-install--kill-retrieval buffer)
+      (when data-buffer (emrs-install--kill-retrieval data-buffer)))))
+
 (defun emrs-install--fetch (url)
   "Return the bytes of URL as a unibyte string.
-Signal `emrs-install--fetch-failed' with a reason on failure."
-  (let ((parsed (url-generic-parse-url url)))
-    (if (equal (url-type parsed) "file")
-        (let ((file (url-unhex-string (url-filename parsed))))
-          (unless (file-regular-p file)
-            (signal 'emrs-install--fetch-failed (list "no such file")))
-          (with-temp-buffer
-            (set-buffer-multibyte nil)
-            (insert-file-contents-literally file)
-            (buffer-string)))
-      (let ((buffer (condition-case err
-                        (url-retrieve-synchronously
-                         url t t emrs-install-timeout)
-                      (error (signal 'emrs-install--fetch-failed
-                                     (list (error-message-string err)))))))
-        (unless buffer
-          (signal 'emrs-install--fetch-failed (list "timeout or no response")))
-        (unwind-protect
-            (with-current-buffer buffer
-              (unless (eql url-http-response-status 200)
-                (signal 'emrs-install--fetch-failed
-                        (list (format "HTTP status %s" url-http-response-status))))
-              (set-buffer-multibyte nil)
-              (encode-coding-string
-               (buffer-substring-no-properties
-                (1+ url-http-end-of-headers) (point-max))
-               'no-conversion))
-          (kill-buffer buffer))))))
+URL is a file: URL or one that `url-retrieve' handles.  Signal
+`emrs-install--fetch-failed' with URL and a reason on failure."
+  (if (string-prefix-p "file:" url)
+      (let ((file (emrs-install--file-url-name url)))
+        (unless (file-regular-p file)
+          (emrs-install--fetch-fail url "no such file"))
+        (with-temp-buffer
+          (set-buffer-multibyte nil)
+          (insert-file-contents-literally file)
+          (buffer-string)))
+    (emrs-install--retrieve url)))
 
 (defun emrs-install--place (module version write built-from)
   "Install MODULE of VERSION by calling WRITE with a temporary file name.
 Write a temporary file in the target directory, set its mode to 0755
-and rename it.  BUILT-FROM is the checkout to record in the file
-`built-from' next to the module, or nil to remove that file.  Return
-the path of the module."
+and rename it.  After the rename, write BUILT-FROM (a string) to the
+file `built-from' next to the module, or remove that file if
+BUILT-FROM is nil.  Return the path of the module."
   (let* ((target (emrs-install--installed-file module version))
          (dir (file-name-directory target))
          (marker (expand-file-name "built-from" dir))
          temp)
-    (condition-case err
-        (progn
-          (make-directory dir t)
-          (setq temp (make-temp-file (expand-file-name ".emrs-install-" dir)))
-          (funcall write temp)
-          (set-file-modes temp #o755)
-          (if built-from
-              (let ((coding-system-for-write 'utf-8))
-                (write-region built-from nil marker nil 'silent))
-            (when (file-exists-p marker) (delete-file marker)))
-          (rename-file temp target t)
-          target)
-      (file-error
-       (when (and temp (file-exists-p temp)) (ignore-errors (delete-file temp)))
-       (user-error "Cannot install %s: %s%s" target (error-message-string err)
-                   (if (eq system-type 'windows-nt)
-                       " (a loaded module cannot be replaced before a restart)"
-                     ""))))))
+    (unwind-protect
+        (condition-case err
+            (progn
+              (make-directory dir t)
+              (setq temp (make-temp-file (expand-file-name ".emrs-install-" dir)))
+              (funcall write temp)
+              (set-file-modes temp #o755)
+              (rename-file temp target t)
+              (setq temp nil)
+              (if built-from
+                  (let ((coding-system-for-write 'utf-8))
+                    (write-region built-from nil marker nil 'silent))
+                (when (file-exists-p marker) (delete-file marker)))
+              target)
+          (file-error
+           (user-error "Cannot install %s: %s%s" target (error-message-string err)
+                       (if (eq system-type 'windows-nt)
+                           " (a loaded module cannot be replaced before a restart)"
+                         ""))))
+      (when (and temp (file-exists-p temp))
+        (ignore-errors (delete-file temp))))))
 
 (defun emrs-install--install (module version bytes)
   "Install BYTES as the file of MODULE of VERSION and return its path.
@@ -237,12 +324,21 @@ A downloaded module has no file `built-from'."
        (write-region bytes nil temp nil 'silent)))
    nil))
 
-(defun emrs-install--install-library (module version library checkout)
-  "Install the built LIBRARY as MODULE of VERSION and return its path.
-CHECKOUT is recorded in the file `built-from'."
-  (emrs-install--place module version
-                       (lambda (temp) (copy-file library temp t))
-                       checkout))
+(defun emrs-install--install-library (module version build)
+  "Install the built library as MODULE of VERSION and return its path.
+BUILD is a plist with :library (the file cargo produced), :checkout,
+:package-dir (the directory of the package's Cargo.toml) and :start
+\(the time the build started).  The installed file gets the start time
+as its modification time; the file `built-from' records the checkout
+and the package directory."
+  (let ((checkout (plist-get build :checkout)))
+    (emrs-install--place
+     module version
+     (lambda (temp)
+       (copy-file (plist-get build :library) temp t)
+       (when (plist-get build :start)
+         (set-file-times temp (plist-get build :start))))
+     (concat checkout "\n" (or (plist-get build :package-dir) checkout) "\n"))))
 
 (defun emrs-install--consent (module version platform url)
   "Return non-nil if the user allows downloading MODULE of VERSION from URL.
@@ -271,6 +367,8 @@ checksum mismatch."
                  (format "no prebuilt module for %s" system-configuration))
                 ((eq emrs-install-download 'never)
                  "`emrs-install-download' is never")
+                ((and noninteractive (not (eq emrs-install-download 'always)))
+                 "not asked in batch mode (set `emrs-install-download' to always)")
                 ((not (emrs-install--consent module version platform url))
                  "download declined"))))
     (if reason
@@ -286,8 +384,8 @@ checksum mismatch."
               (setq expected (emrs-install--checksum-for
                               (decode-coding-string sums 'utf-8) name))
               (unless expected
-                (signal 'emrs-install--fetch-failed
-                        (list (format "no checksum for %s in %s" name sums-url))))
+                (emrs-install--fetch-fail
+                 sums-url (format "no checksum for %s" name)))
               (setq bytes (emrs-install--fetch asset-url))
               (setq actual (secure-hash 'sha256 bytes))
               (unless (string= actual expected)
@@ -296,17 +394,18 @@ checksum mismatch."
               (prog1 (list (emrs-install--install module version bytes))
                 (message "Downloading the %s module %s...done" module version)))
           (emrs-install--fetch-failed
-           (let ((text (format "download from %s failed: %s"
-                               base (mapconcat #'identity (cdr err) " "))))
+           (let ((text (format "download of %s failed: %s"
+                               (nth 1 err) (nth 2 err))))
              (message "emrs-install: %s" text)
              (cons nil text))))))))
 
 ;;;; Local build
 
-(defvar emrs--modules)
-
 (defvar emrs-install--builds (make-hash-table :test 'equal)
-  "Running asynchronous builds: (MODULE VERSION CHECKOUT LIBRARY) by buffer name.")
+  "Running asynchronous builds by build buffer name.
+Each value is (MODULE VERSION BUILD), with the module and version
+captured when the build started and BUILD the plist that
+`emrs-install--install-library' takes.")
 
 (defun emrs-install--loaded-p (module)
   "Return non-nil if MODULE is loaded in this Emacs."
@@ -333,30 +432,42 @@ cargo configuration can move the library."
                   (expand-file-name "target" checkout))
             (and package (list "-p" package)))))
 
-(defun emrs-install--library-file (metadata checkout package)
-  "Return the library file that building PACKAGE in CHECKOUT produces.
+(defun emrs-install--package (metadata checkout package)
+  "Return the package that building PACKAGE in CHECKOUT builds.
 METADATA is the parsed output of `cargo metadata' (alists and lists).
 PACKAGE is a package name, or nil for the package whose manifest is the
-Cargo.toml of CHECKOUT.  Signal a `user-error' if there is no cdylib."
-  (let* ((manifest (file-truename (expand-file-name "Cargo.toml" checkout)))
-         (pkg (seq-find
-               (lambda (p)
-                 (if package
-                     (equal (alist-get 'name p) package)
-                   (let ((path (alist-get 'manifest_path p)))
-                     (and path (file-exists-p path)
-                          (equal (file-truename path) manifest)))))
-               (alist-get 'packages metadata)))
-         (name (or package "the package in Cargo.toml"))
-         (target (and pkg
-                      (seq-find
-                       (lambda (tg)
-                         (or (member "cdylib" (alist-get 'kind tg))
-                             (member "cdylib" (alist-get 'crate_types tg))))
-                       (alist-get 'targets pkg)))))
-    (unless pkg
-      (user-error "Cargo knows no package %s in %s; check :package of `emrs-install-register'"
-                  name checkout))
+Cargo.toml of CHECKOUT.  Signal a `user-error' if there is none."
+  (let ((manifest (file-truename (expand-file-name "Cargo.toml" checkout))))
+    (or (seq-find
+         (lambda (p)
+           (if package
+               (equal (alist-get 'name p) package)
+             (let ((path (alist-get 'manifest_path p)))
+               (and path (file-exists-p path)
+                    (equal (file-truename path) manifest)))))
+         (alist-get 'packages metadata))
+        (user-error "Cargo knows no package %s in %s; check :package of `emrs-install-register'"
+                    (or package "the package in Cargo.toml") checkout))))
+
+(defun emrs-install--package-dir (metadata checkout package)
+  "Return the directory of the manifest of PACKAGE in CHECKOUT.
+METADATA and PACKAGE are as for `emrs-install--package'."
+  (let ((path (alist-get 'manifest_path
+                         (emrs-install--package metadata checkout package))))
+    (if path
+        (file-name-as-directory (file-name-directory (expand-file-name path)))
+      checkout)))
+
+(defun emrs-install--library-file (metadata checkout package)
+  "Return the library file that building PACKAGE in CHECKOUT produces.
+METADATA and PACKAGE are as for `emrs-install--package'.  Signal a
+`user-error' if there is no such package or it has no cdylib."
+  (let* ((pkg (emrs-install--package metadata checkout package))
+         (target (seq-find
+                  (lambda (tg)
+                    (or (member "cdylib" (alist-get 'kind tg))
+                        (member "cdylib" (alist-get 'crate_types tg))))
+                  (alist-get 'targets pkg))))
     (unless target
       (user-error "Package %s has no cdylib target; add crate-type = [\"cdylib\"] to its [lib] section"
                   (alist-get 'name pkg)))
@@ -367,33 +478,49 @@ Cargo.toml of CHECKOUT.  Signal a `user-error' if there is no cdylib."
              module-file-suffix)
      checkout)))
 
-(defun emrs-install--library (module checkout program)
-  "Return the library file of MODULE built in CHECKOUT, using cargo PROGRAM.
-Run `cargo metadata'; signal a `user-error' if that fails."
-  (let ((package (plist-get (gethash module emrs-install--registry) :package))
-        (default-directory checkout)
-        metadata)
-    (with-temp-buffer
-      (let ((status (call-process program nil (list t nil) nil
-                                  "metadata" "--no-deps" "--format-version" "1")))
-        (unless (eql status 0)
-          (user-error "`%s metadata' failed in %s" program checkout))
-        (goto-char (point-min))
-        (setq metadata (condition-case nil
-                           (json-parse-buffer :object-type 'alist
-                                              :array-type 'list)
-                         (error (user-error "`%s metadata' gave no JSON in %s"
-                                            program checkout))))))
-    (emrs-install--library-file metadata checkout package)))
+(defun emrs-install--metadata (checkout program)
+  "Return the parsed output of `cargo metadata' in CHECKOUT.
+PROGRAM is the cargo program.  Signal a `user-error' if that fails,
+with the error output of cargo."
+  (let ((default-directory checkout)
+        (stderr (make-temp-file "emrs-install-stderr")))
+    (unwind-protect
+        (with-temp-buffer
+          (let ((status (call-process program nil (list t stderr) nil
+                                      "metadata" "--no-deps"
+                                      "--format-version" "1")))
+            (unless (eql status 0)
+              (user-error "`%s metadata' failed in %s: %s" program checkout
+                          (with-temp-buffer
+                            (insert-file-contents stderr)
+                            (string-trim (buffer-string)))))
+            (goto-char (point-min))
+            (condition-case nil
+                (json-parse-buffer :object-type 'alist :array-type 'list)
+              (error (user-error "`%s metadata' gave no JSON in %s"
+                                 program checkout)))))
+      (ignore-errors (delete-file stderr)))))
 
-(defun emrs-install--install-built (module checkout library)
-  "Install LIBRARY built in CHECKOUT as the registered version of MODULE.
-Return the installed file; signal a `user-error' if LIBRARY is missing."
-  (let ((version (plist-get (emrs-install--entry module) :version)))
+(defun emrs-install--prepare-build (module checkout program)
+  "Return the build plist of MODULE in CHECKOUT, using cargo PROGRAM.
+It has :library, :checkout and :package-dir; see
+`emrs-install--install-library'.  Run `cargo metadata'; signal a
+`user-error' if that fails or the package has no cdylib."
+  (let ((package (plist-get (gethash module emrs-install--registry) :package))
+        (metadata (emrs-install--metadata checkout program)))
+    (list :library (emrs-install--library-file metadata checkout package)
+          :checkout checkout
+          :package-dir (emrs-install--package-dir metadata checkout package))))
+
+(defun emrs-install--install-built (module version build)
+  "Install the library of BUILD as MODULE of VERSION.
+BUILD is the plist of `emrs-install--install-library'.  Return the
+installed file; signal a `user-error' if the library is missing."
+  (let ((library (plist-get build :library)))
     (unless (file-exists-p library)
       (user-error "Cargo produced no %s; the package needs crate-type = [\"cdylib\"]"
                   library))
-    (emrs-install--install-library module version library checkout)))
+    (emrs-install--install-library module version build)))
 
 (defun emrs-install--source-checkout (module)
   "Return the checkout of MODULE or signal a `user-error'."
@@ -422,11 +549,11 @@ Meant for `compilation-finish-functions'; it ignores other buffers."
          (info (gethash name emrs-install--builds)))
     (when info
       (remhash name emrs-install--builds)
-      (pcase-let ((`(,module ,checkout ,library) info))
+      (pcase-let ((`(,module ,version ,build) info))
         (if (not (equal message "finished\n"))
             (message "%s module build failed (see %s)" module name)
           (condition-case err
-              (progn (emrs-install--install-built module checkout library)
+              (progn (emrs-install--install-built module version build)
                      (message "%s" (emrs-install--built-message module)))
             (error (message "%s module build failed: %s" module
                             (error-message-string err)))))))))
@@ -440,13 +567,14 @@ The output goes to the buffer `*emrs-install MODULE*'.  On success the
 module is installed as its registered version; a running Emacs needs a
 restart to use a rebuilt module.  Return the build process."
   (interactive (list (emrs-install--read-module)))
-  (emrs-install--entry module)
-  (let ((name (emrs-install--buffer-name module)))
+  (let ((version (plist-get (emrs-install--entry module) :version))
+        (name (emrs-install--buffer-name module)))
     (when (get-buffer-process name)
       (user-error "The %s module is being built (see %s)" module name))
     (let* ((checkout (emrs-install--source-checkout module))
            (program (emrs-install--program))
-           (library (emrs-install--library module checkout program))
+           (build (emrs-install--prepare-build module checkout program))
+           (start (current-time))
            (default-directory checkout)
            (buffer (compilation-start
                     (mapconcat #'shell-quote-argument
@@ -456,7 +584,8 @@ restart to use a rebuilt module.  Return the build process."
                                " ")
                     'compilation-mode
                     (lambda (_mode) name))))
-      (puthash name (list module checkout library) emrs-install--builds)
+      (puthash name (list module version (plist-put build :start start))
+               emrs-install--builds)
       (get-buffer-process buffer))))
 
 (defun emrs-install--output-tail (buffer &optional lines)
@@ -473,9 +602,10 @@ restart to use a rebuilt module.  Return the build process."
 Never signal: a failure becomes a warning.  In batch mode the warning
 includes the end of the build output.  Return non-nil on success."
   (condition-case err
-      (let* ((checkout (emrs-install--source-checkout module))
+      (let* ((version (plist-get (emrs-install--entry module) :version))
+             (checkout (emrs-install--source-checkout module))
              (program (emrs-install--program))
-             (library (emrs-install--library module checkout program))
+             (build (emrs-install--prepare-build module checkout program))
              (default-directory checkout)
              (name (emrs-install--buffer-name module))
              buffer status)
@@ -483,13 +613,14 @@ includes the end of the build output.  Return non-nil on success."
           (user-error "The %s module is being built (see %s)" module name))
         (when (get-buffer name) (kill-buffer name))
         (setq buffer (get-buffer-create name))
+        (setq build (plist-put build :start (current-time)))
         (setq status (apply #'call-process program nil buffer nil
                             (emrs-install--build-arguments module checkout)))
         (unless (eql status 0)
           (if noninteractive
               (error "The build failed:\n%s" (emrs-install--output-tail buffer))
             (error "The build failed (see %s)" (buffer-name buffer))))
-        (emrs-install--install-built module checkout library)
+        (emrs-install--install-built module version build)
         (message "%s" (emrs-install--built-message module))
         t)
     (error
@@ -501,31 +632,43 @@ includes the end of the build output.  Return non-nil on success."
 
 ;;;; Staleness
 
-(defun emrs-install--stale-p (checkout file)
-  "Return non-nil if a source file in CHECKOUT is newer than FILE.
-The sources are the .rs files below src/, build.rs, Cargo.toml and
-Cargo.lock."
-  (let ((sources (append
-                  (let ((src (expand-file-name "src" checkout)))
-                    (and (file-directory-p src)
-                         (directory-files-recursively src "\\.rs\\'")))
-                  (mapcar (lambda (f) (expand-file-name f checkout))
-                          '("build.rs" "Cargo.toml" "Cargo.lock")))))
+(defun emrs-install--stale-p (checkout file &optional package-dir)
+  "Return non-nil if a source file is newer than FILE.
+The sources are the .rs files below src/, build.rs and Cargo.toml of
+PACKAGE-DIR (default CHECKOUT) and Cargo.lock of CHECKOUT."
+  (let* ((pkg (or package-dir checkout))
+         (sources (append
+                   (let ((src (expand-file-name "src" pkg)))
+                     (and (file-directory-p src)
+                          (directory-files-recursively src "\\.rs\\'")))
+                   (list (expand-file-name "build.rs" pkg)
+                         (expand-file-name "Cargo.toml" pkg)
+                         (expand-file-name "Cargo.lock" checkout)))))
     (seq-some (lambda (source)
                 (and (file-exists-p source)
                      (file-newer-than-file-p source file)))
               sources)))
 
 (defun emrs-install--built-from (file)
-  "Return the checkout recorded next to the module FILE, or nil."
+  "Return what the file `built-from' next to the module FILE records.
+That is (CHECKOUT PACKAGE-DIR), or nil if there is no such file or the
+checkout is gone.  A marker of one line (an older format), or one
+whose package directory is gone, gives the checkout as PACKAGE-DIR."
   (let ((marker (expand-file-name "built-from" (file-name-directory file))))
     (when (file-readable-p marker)
-      (let ((dir (string-trim
-                  (with-temp-buffer
-                    (let ((coding-system-for-read 'utf-8))
-                      (insert-file-contents marker))
-                    (buffer-string)))))
-        (and (file-directory-p dir) dir)))))
+      (let* ((lines (split-string
+                     (with-temp-buffer
+                       (let ((coding-system-for-read 'utf-8))
+                         (insert-file-contents marker))
+                       (buffer-string))
+                     "[\r\n]+" t "[ \t]+"))
+             (checkout (car lines))
+             (package-dir (cadr lines)))
+        (when (and checkout (file-directory-p checkout))
+          (list checkout
+                (if (and package-dir (file-directory-p package-dir))
+                    package-dir
+                  checkout)))))))
 
 (defun emrs-install--start-build (module)
   "Start the build of MODULE and tell the user to run the command again."
@@ -537,13 +680,13 @@ Cargo.lock."
   "Return FILE, the file found for MODULE of VERSION, or rebuild it.
 If FILE is a local build older than its sources, ask whether to build
 it again (interactive sessions only)."
-  (let ((checkout (and (equal file (emrs-install--installed-file module version))
-                       (emrs-install--built-from file))))
-    (when (and checkout
+  (let ((built-from (and (equal file (emrs-install--installed-file module version))
+                         (emrs-install--built-from file))))
+    (when (and built-from
                (not noninteractive)
                (not (emrs-install--loaded-p module))
                (emrs-install--checkout module)
-               (emrs-install--stale-p checkout file)
+               (emrs-install--stale-p (car built-from) file (cadr built-from))
                (y-or-n-p (format "The %s module is older than its sources.  Rebuild it now with cargo? "
                                  module)))
       (emrs-install--start-build module))
@@ -621,7 +764,8 @@ warns once if its version differs from the registered one."
        'emrs-install
        (format "The %s module reports version %s but %s is registered (file %s).  Restart Emacs after `M-x emrs-install-module', since a module cannot be unloaded."
                module actual registered
-               (or (emrs-install-file module) "unknown"))))
+               (or (emrs--module-file (gethash module emrs--modules))
+                   "unknown"))))
     handle))
 
 ;;;; Commands

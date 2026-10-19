@@ -227,7 +227,7 @@ main file, and loads it through the installer:
 | Key | Meaning |
 |---|---|
 | `:version` | Required. The crate version; between releases `X.Y.Z-snapshot` |
-| `:url` | Base URL of the releases; the files of a version are at `<url>/v<version>/` |
+| `:url` | Base URL of the releases, `https://` (or `file:`); the files of a version are at `<url>/v<version>/` |
 | `:source` | A file of the package; the nearest directory above it with a `Cargo.toml` is the checkout to build from |
 | `:package` | The Cargo package to build, in a workspace with several |
 
@@ -256,7 +256,8 @@ argument it builds), `M-x emrs-install-build` builds it, and
 `M-x emrs-install-clean` deletes versions that are no longer used. User
 options (group `emrs-install`): `emrs-install-download` (`ask`, `always`,
 `never`; in batch mode `ask` means `never`), `emrs-install-directory`,
-`emrs-install-timeout`, `emrs-install-cargo-program`.
+`emrs-install-timeout` (seconds without data before a download is
+stopped), `emrs-install-cargo-program`.
 
 Package recipes must include both files of emrs, for example
 `:files ("elisp/*.el")` instead of `("elisp/emrs.el")`.
