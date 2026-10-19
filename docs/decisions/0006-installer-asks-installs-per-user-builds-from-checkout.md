@@ -1,7 +1,8 @@
 # 0006 — The installer asks before downloading, installs per user and builds only from a checkout
 
 Date: 2026-10-17
-Status: accepted
+Status: accepted; the installer spec of 2026-10-19 adds an offer to rebuild a
+local build older than its sources, which changes the last consequence
 
 ## Context
 

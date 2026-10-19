@@ -15,6 +15,8 @@ Lisp values.
 
 The project has two parts: the Rust crate `emrs` (dependencies `serde` and
 `libc` only) and the Elisp library `elisp/emrs.el` (Emacs 30.1 or later).
+`elisp/emrs-install.el`, in the same Elisp package, gives packages their
+module (installed, downloaded or built); modules do not depend on it.
 The build tool `cargo-emacs` is a separate crate that modules do not link.
 Every module statically links its own copy of `emrs` and so has its own
 runtime. Modules built against different `emrs` versions coexist in one
@@ -33,10 +35,11 @@ Emacs.
 | `emrs/src/module.rs` | The eight protocol functions and the `module!` macro; wraps every body in `catch_unwind` | `ffi`, `convert`, `runtime` |
 | `emrs/src/testing.rs` | Host for testing services without Emacs | `runtime` |
 | `elisp/emrs.el` | Loads modules and checks their protocol version, owns the wake-up pipe process, drains deliveries and dispatches them to callbacks; public API `emrs-send`, `emrs-call`, `emrs-call-sync`, `emrs-call-stream`, `emrs-call-stream-sync`, `emrs-stop` | module protocol |
+| `elisp/emrs-install.el` | Gives a registered package its module: the installed version under `<user-emacs-directory>/emrs/modules/`, else the release file for the platform checked against `SHA256SUMS` after asking, else a cargo build in the package's checkout; then loads it and warns on a version mismatch (ADR 0006, 0008, 0009). Does not require `emrs.el` until it loads a module | `url`, `compile`, `emrs.el`, release layout (ADR 0004) |
 | `cargo-emacs/` | The Cargo subcommand. `build` runs `cargo build`, reads the library path from Cargo's JSON messages and installs it as `<name>-module` plus suffix in `target/emacs/` (ADR 0002). `package` does the same as a release build, optionally with `cargo zigbuild`, and writes `<name>-module-<platform>.<ext>` to `target/emacs/dist/`, with the platform name from the target triple (ADR 0004). Not linked into modules | `cargo`, `serde_json` |
 | `.github/workflows/module-release.yml` | Reusable workflow for module repositories: builds the four platforms (ADR 0007) with `cargo emacs package` (Linux with zigbuild against glibc 2.28, ADR 0005), checks the glibc baseline, tests each file in Emacs, and on a tag `v<version>` uploads the files and `SHA256SUMS` to the release (ADR 0004). `release-check.yml` runs it on `examples/echo` without publishing | `cargo-emacs`, GitHub Actions |
 | `tests/emrs-test-module/` | `cdylib` with round-trip and misbehaving services for the ERT suite | `emrs` |
-| `tests/elisp/`, `tests/run-ert.sh` | ERT suite, run with `--module-assertions` | test module, `emrs.el` |
+| `tests/elisp/`, `tests/run-ert.sh` | ERT suite, run with `--module-assertions`; `emrs-install-tests.el` covers the installer offline with `file://` releases | test module, `emrs.el`, `emrs-install.el` |
 | `examples/echo`, `examples/grep` | Complete example modules with smoke tests (`examples/run-examples.sh`) | `emrs`, `emrs.el` |
 
 ## How it fits together
@@ -110,5 +113,9 @@ Emacs.
   newer for a plain `cargo build` on Ubuntu 24.04). zigbuild with
   `<triple>.2.28` keeps it at 2.28; the release workflow checks this with
   `readelf` (ADR 0005).
+- `url-retrieve-synchronously` returns nil on its timeout but leaves the
+  connection and its buffer running, and url.el keeps HTTP connections
+  alive by default. `emrs-install.el` therefore waits on `url-retrieve`
+  itself and binds `url-http-attempt-keepalives` to nil.
 - `copy_string_contents` returns the raw bytes of unibyte strings, including
   bytes above 127. No fallback is needed.

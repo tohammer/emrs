@@ -44,24 +44,6 @@ Design notes from the original brainstorming:
 - Never hand Lisp a pointer into Rust memory. Accessors copy the requested
   part into a Lisp value.
 
-## Installer for prebuilt modules
-
-The release side exists (spec `docs/specs/2026-10-17-release-pipeline.md`):
-`cargo emacs package`, the reusable workflow and the asset layout of ADR
-0004. Missing is the Elisp side, a separate library `emrs-install.el` that
-gives a package its module: one already installed, else the release asset
-for its exact version (checked against `SHA256SUMS`), else a `cargo build`
-in the package's checkout. Decided in ADR 0006: ask before downloading
-(user option always/ask/never), install under
-`<user-emacs-directory>/emrs/modules/<module>/<version>/`, build only from a
-checkout. Still open:
-
-- Map `system-configuration` to the platform names of ADR 0004.
-- On a load failure, report what was detected (Emacs version, platform) and
-  what the file requires (glibc 2.28, the macOS version Rust targets).
-- A command that removes old versions from the user directory.
-- quarry's `quarry-build.el` is the model for the build part.
-
 ## `cargo emacs`: further subcommands and configuration
 
 `cargo emacs build` and `cargo emacs package` exist. Left out: subcommands
@@ -108,6 +90,22 @@ Origin: review of the release pipeline (spec of 2026-10-17), 2026-10-18.
 - `gh release edit --draft=false` (publishing a release the workflow
   created) has not run on GitHub yet; the first release of a module whose
   tag has no release exercises it.
+
+## Installer: deferred review findings
+
+Origin: review of `emrs-install.el` (spec of 2026-10-19), 2026-10-19.
+Deferred as untested territory rather than known defects; revisit when a
+package adopts the installer or on a user report.
+
+- Windows and macOS were not tried by hand; the ERT suite runs there in CI
+  only (Windows best effort). The `file:///C:/...` handling is unit-tested
+  on Linux only.
+- How a package manager's pre-build step finds `emrs-install.el` is open
+  (README); the first adopting package settles it.
+- Not covered by tests: two modules building at the same time, an error
+  inside the compilation finish hook, `load-file-name` under native
+  compilation (`.eln`), HTTPS certificate prompts in batch mode, non-ASCII
+  paths in `file:` URLs.
 
 ## Pull-style streams and overflow policies
 

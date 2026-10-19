@@ -1,7 +1,8 @@
 # 0004 — Release assets: one per platform, per exact version, checked by SHA256SUMS
 
 Date: 2026-10-17
-Status: accepted; the platform list is amended by ADR 0007
+Status: accepted; the platform list is amended by ADR 0007, the `-dev`
+example is replaced by `-snapshot` in ADR 0008
 
 ## Context
 

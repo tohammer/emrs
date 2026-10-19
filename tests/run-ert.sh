@@ -8,4 +8,5 @@ cargo run -q -p cargo-emacs -- build -p emrs-test-module
 exec "${EMACS:-emacs}" --batch --module-assertions \
     -L "$root/elisp" -L "$root/target/emacs" \
     -l "$root/tests/elisp/emrs-tests.el" \
+    -l "$root/tests/elisp/emrs-install-tests.el" \
     -f ert-run-tests-batch-and-exit
