@@ -101,7 +101,11 @@ package adopts the installer or on a user report.
   only (Windows best effort). The `file:///C:/...` handling is unit-tested
   on Linux only.
 - How a package manager's pre-build step finds `emrs-install.el` is open
-  (README); the first adopting package settles it.
+  (README). emrs-dirdiff, the first adopter, chose on 2026-10-20 to drop its
+  `:pre-build` step: after an update its first command offers the build
+  through the installer instead. Revisit when a package wants the module
+  ready right after `doom sync`; that needs a manual test with straight,
+  since CI cannot run it.
 - Not covered by tests: two modules building at the same time, an error
   inside the compilation finish hook, `load-file-name` under native
   compilation (`.eln`), HTTPS certificate prompts in batch mode, non-ASCII
