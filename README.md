@@ -322,7 +322,9 @@ four platforms, without publishing; it can also be started by hand.
 
 ## Projects using emrs
 
-- [emacs-quarry](https://github.com/tohammer/emrs-quarry): a fast project
+- [emrs-dirdiff](https://github.com/tohammer/emrs-dirdiff): fast directory
+  tree comparison for Emacs.
+- [emrs-quarry](https://github.com/tohammer/emrs-quarry): a fast project
   file finder and an interactive grep for Emacs, both backed by one Rust
   module.
 
