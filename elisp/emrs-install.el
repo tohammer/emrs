@@ -2,7 +2,7 @@
 
 ;; Copyright (C) 2026  The emrs authors
 
-;; Version: 0.2.0
+;; Version: 0.3.0-snapshot
 ;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: extensions
 ;; SPDX-License-Identifier: GPL-3.0-or-later

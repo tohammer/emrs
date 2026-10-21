@@ -1,6 +1,6 @@
 [package]
 name = "cargo-emacs"
-version = "0.2.0"
+version = "0.3.0-snapshot"
 description = "Cargo subcommand that builds Emacs dynamic modules and installs them under the name Emacs loads"
 edition.workspace = true
 rust-version.workspace = true
