@@ -69,15 +69,26 @@ emrs::module!("echo-rs", [Echo]);
 
 ## Building a module
 
-Make the crate a `cdylib` and keep `panic = "unwind"` (the default). Emacs
-loads a module from the file `<module>-module` plus its `module-file-suffix`
-on `load-path`, where `<module>` is the name given to `emrs::module!`.
+emrs is not on crates.io. Depend on a release tag; `master` is the
+development version (`X.Y.Z-snapshot`):
+
+```toml
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+emrs = { git = "https://github.com/tohammer/emrs", tag = "v0.2.0" }
+```
+
+Keep `panic = "unwind"` (the default). Emacs loads a module from the file
+`<module>-module` plus its `module-file-suffix` on `load-path`, where
+`<module>` is the name given to `emrs::module!`.
 
 `cargo emacs build` builds the crate and installs the library under that
-name. Install the tool once:
+name. Install the tool once, from the same release:
 
 ```sh
-cargo install --git https://github.com/tohammer/emrs cargo-emacs
+cargo install --git https://github.com/tohammer/emrs --tag v0.2.0 cargo-emacs
 ```
 
 Then, in the module crate:
@@ -167,9 +178,10 @@ permissions:
   contents: write
 jobs:
   release:
-    uses: tohammer/emrs/.github/workflows/module-release.yml@master
+    uses: tohammer/emrs/.github/workflows/module-release.yml@v0.2.0
     with:
       package: echo-rs
+      cargo-emacs: v0.2.0
       publish: ${{ startsWith(github.ref, 'refs/tags/v') }}
 ```
 
@@ -182,10 +194,10 @@ builds and tests without publishing.
 
 Only the publish job gets the write token; the jobs that build and test run
 with read access. Pin the workflow and `cargo-emacs` to the same emrs
-commit (`module-release.yml@<commit>` and `cargo-emacs: <commit>`) if the
-release must not change with emrs's `master`. A `rust-toolchain.toml` in the
-module's repository overrides `rust-toolchain`; it must then list the
-targets of the platforms built.
+release, as above, and preferably the one the module's `emrs` dependency
+uses; with `@master` the build changes with emrs's development version. A
+`rust-toolchain.toml` in the module's repository overrides
+`rust-toolchain`; it must then list the targets of the platforms built.
 
 | Input | Default | Meaning |
 |---|---|---|

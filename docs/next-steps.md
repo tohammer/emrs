@@ -21,6 +21,9 @@ to `elisp/*.el`, and move emrs-dirdiff's crate version from `0.2.0-dev` to
 - Module repositories call `module-release.yml@master`, so a change to its
   inputs or to the asset layout of ADR 0004 breaks them. Change both only
   in a compatible way, or with a new ADR and a note in the README.
+- An emrs release moves the `v0.2.0` pins in the README (dependency,
+  `cargo install`, release workflow) to the new tag, then `master` to the
+  next `-snapshot` version.
 - A change to the protocol functions or delivery shapes must bump the
   protocol integer and keep the older code path in `emrs.el` (spec section
   6.2).
