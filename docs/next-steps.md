@@ -5,11 +5,8 @@ architecture.md or an ADR.
 
 ## Next
 
-Adoption of `emrs-install.el` by emrs-dirdiff and quarry, in their own
-repositories (their backlogs list it): register the module, replace their
-build files and loading code with `emrs-install-load`, change their recipes
-to `elisp/*.el`, and move emrs-dirdiff's crate version from `0.2.0-dev` to
-`0.2.0-snapshot` (ADR 0008).
+Nothing scheduled. Pick the next item from `docs/backlog.md`. Quarry's
+switch to `emrs-install.el` is in quarry's backlog ("Distribution").
 
 ## Watch out for
 
