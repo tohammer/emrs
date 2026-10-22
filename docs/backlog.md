@@ -84,7 +84,7 @@ Origin: review of the release pipeline (spec of 2026-10-17), 2026-10-18.
   Update the pins deliberately, for example when a new Emacs version is
   added to the defaults.
 - `cargo-emacs` defaults to emrs `master`, so a caller that pins the
-  workflow to a commit still gets the newest tool (README says to pin both).
+  workflow to a commit still gets the newest tool (`docs/user/distributing.md` says to pin both).
   A default derived from the workflow's own ref was not found. Revisit if
   workflow and tool drift apart in practice.
 - `gh release edit --draft=false` (publishing a release the workflow
@@ -101,7 +101,7 @@ package adopts the installer or on a user report.
   only (Windows best effort). The `file:///C:/...` handling is unit-tested
   on Linux only.
 - How a package manager's pre-build step finds `emrs-install.el` is open
-  (README). emrs-dirdiff, the first adopter, chose on 2026-10-20 to drop its
+  (`docs/user/distributing.md`). emrs-dirdiff, the first adopter, chose on 2026-10-20 to drop its
   `:pre-build` step: after an update its first command offers the build
   through the installer instead. Revisit when a package wants the module
   ready right after `doom sync`; that needs a manual test with straight,
