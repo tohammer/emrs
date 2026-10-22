@@ -20,7 +20,7 @@ Lisp values map to Rust types. For the Rust API run
 | Function | Returns | Description |
 |---|---|---|
 | `(emrs-start MODULE SERVICE ARGS &key on-event on-exit)` | instance | Start an instance; `ARGS` is decoded to `Service::Args`. Loads the module if needed |
-| `(emrs-stop INSTANCE)` | `nil` | Stop the instance; returns at once, `on-exit` runs when it has stopped. Does nothing on a stopped instance |
+| `(emrs-stop INSTANCE)` | `nil` | Stop the instance; returns at once, `on-exit` runs when it has stopped. Does nothing unless the instance is `starting` or `running` |
 | `(emrs-send INSTANCE REQUEST)` | `nil` | Send a request without expecting an answer |
 | `(emrs-call INSTANCE REQUEST CALLBACK)` | call | Send a request; `CALLBACK` gets the reply |
 | `(emrs-call-sync INSTANCE REQUEST &optional TIMEOUT)` | reply | Send a request and wait for the reply |

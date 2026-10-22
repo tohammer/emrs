@@ -100,8 +100,9 @@ Requirements: Rust 1.85 or later, Emacs 30.1 or later, Git.
    cargo emacs build
    ```
 
-   It prints the path of the module, `target/emacs/echo-rs-module.so` on
-   Linux.
+   It prints the absolute path of the module, ending in
+   `target/emacs/echo-rs-module.so` on Linux (`.dylib` on macOS, `.dll` on
+   Windows).
 
 6. Get `emrs.el` of the same release and call the service:
 
@@ -135,7 +136,7 @@ Emacs loads a module from the file `<module>-module` plus
 and installs the library under that name:
 
 ```sh
-cargo emacs build --release   # prints target/emacs/echo-rs-module.so
+cargo emacs build --release   # prints /…/target/emacs/echo-rs-module.so
 ```
 
 - The library goes to `emacs/` in the target directory; `--dir <path>`
@@ -201,6 +202,7 @@ The service answers with `reply.stream()` and sends items from a spawned
 task (see `examples/grep`). Elisp receives them in batches:
 
 ```elisp
+(setq g (emrs-start 'grep-rs "grep" nil))
 (setq call
       (emrs-call-stream g '(:grep :pattern "TODO" :root "/src")
         :on-batch (lambda (items) (my-insert-matches items))
@@ -229,8 +231,9 @@ The synchronous calls signal `emrs-error` with the data
 
 ```elisp
 (condition-case err
-    (emrs-call-sync g '(:grep :pattern "x" :root "/no/such/dir") 5.0)
+    (emrs-call-stream-sync g '(:grep :pattern "x" :root "/no/such/dir") 5.0)
   (emrs-error (message "%s: %s" (nth 1 err) (nth 2 err))))
+;; prints "service: /no/such/dir is not a directory"
 ```
 
 The asynchronous calls pass the same information as a plist
@@ -283,7 +286,7 @@ Setup, versions, workflow inputs and installer options:
 
 ## Troubleshooting
 
-**`Module <module> uses emrs protocol <n> but this emrs.el supports 1 to <m>`**:
+**`Module <module> uses emrs protocol <n> but this emrs.el supports 1 to <m>; upgrade the emrs Elisp package`**:
 the module was built with a newer emrs than the loaded `emrs.el`. Load the
 `emrs.el` of the emrs version the module depends on.
 
@@ -304,11 +307,10 @@ examples/run-examples.sh   # the example modules
 
 Set `EMACS` to run the Emacs suites with another binary, for example
 `EMACS=/path/to/emacs-30 tests/run-ert.sh`. CI runs all of this on pull
-requests and on pushes to `master`. When `cargo-emacs`, `emrs`,
-`elisp`, `examples/echo`, the workspace's `Cargo.toml` or `Cargo.lock`, or
-`.github/workflows/module-release.yml` or `release-check.yml` change, the
-workflow "Release check" also runs the release workflow on `echo` for all
-four platforms, without publishing; it can also be started by hand.
+requests and on pushes to `master`. When the crates, the Elisp, the
+example `echo` or the release workflow change, the workflow "Release check"
+also runs the release workflow on `echo` for all four platforms without
+publishing; its file lists the exact paths. It can also be started by hand.
 
 Repository layout: `emrs/` (the crate), `elisp/` (`emrs.el`,
 `emrs-install.el`), `cargo-emacs/`, `.github/workflows/module-release.yml`,

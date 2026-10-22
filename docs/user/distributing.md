@@ -114,8 +114,9 @@ A `rust-toolchain.toml` in the module's repository overrides the input
    `-snapshot` versions.
 3. A build with cargo in the package's checkout. In an interactive session
    the user is asked first; the build runs in the buffer
-   `*emrs-install <module>*`, and the command stops and has to be run again
-   when the build is done. Not offered in batch mode.
+   `*emrs-install <module>*`, and the command that needed the module ends
+   with a message to run it again once the build is done. Not offered in
+   batch mode.
 
 If none works, the error says what was tried. A loaded module that reports
 another version than the registered one gives a warning.
@@ -181,15 +182,19 @@ Inputs of `module-release.yml`:
 | Key | Description |
 |---|---|
 | `:version` | Required. The crate version; between releases `X.Y.Z-snapshot` |
-| `:url` | Base URL of the releases, `https://` or `file:`; the files of a version are at `<url>/v<version>/` |
+| `:url` | Base URL of the releases, `https://` or `file:`; the files of a version are at `<url>/v<version>/`. Without it nothing is downloaded |
 | `:source` | A file of the package; the nearest directory above it with a `Cargo.toml` is the checkout to build from |
 | `:package` | The Cargo package to build, in a workspace with several |
+
+The module name consists of letters, digits, `.`, `_`, `+` and `-`, and
+starts with a letter or digit.
+Registering a module again replaces its entry.
 
 ### Commands
 
 | Command | Action |
 |---|---|
-| `M-x emrs-install-module` | Install a module again; with a prefix argument, build it |
+| `M-x emrs-install-module` | Download the registered version again, or build it where no download is possible; with a prefix argument, build it |
 | `M-x emrs-install-build` | Build a module with cargo |
 | `M-x emrs-install-clean` | Delete installed versions that are no longer used |
 
@@ -204,9 +209,16 @@ Group `emrs-install`.
 | `emrs-install-timeout` | `60` | Seconds without data before a download is stopped |
 | `emrs-install-cargo-program` | `"cargo"` | The cargo program for builds |
 
-### Functions for package managers
+### Functions
 
-`emrs-install-build-sync` builds a registered module and never signals; a
-failure becomes a warning. It is meant for pre-build steps of package
-managers. How such a step finds `emrs-install.el` depends on the package
-manager and has not been tried.
+| Function | Description |
+|---|---|
+| `(emrs-install-load MODULE)` | Get the module if needed, load it and return its handle |
+| `(emrs-install-ensure MODULE)` | Get the module if needed and return the file to load, without loading it; signals `user-error` if nothing works |
+| `(emrs-install-file MODULE)` | The installed file of the registered version, else `<module>-module` on `load-path`, else `nil`; never downloads or builds |
+| `(emrs-install-platform)` | The platform name of this Emacs in the release layout, such as `linux-x86_64`, or `nil` |
+| `(emrs-install-build-sync MODULE)` | Build the module with cargo and wait; never signals, a failure becomes a warning. Returns non-nil on success |
+
+`emrs-install-build-sync` is meant for pre-build steps of package managers.
+How such a step finds `emrs-install.el` depends on the package manager and
+has not been tried.
