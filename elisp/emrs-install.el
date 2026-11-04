@@ -340,13 +340,22 @@ and the package directory."
          (set-file-times temp (plist-get build :start))))
      (concat checkout "\n" (or (plist-get build :package-dir) checkout) "\n"))))
 
+(defun emrs-install--no-prompt-reason ()
+  "Return why the user cannot be asked a question now, or nil.
+A daemon has no way to answer until a client's frame is selected:
+`y-or-n-p' on the initial terminal reads the daemon's stdin, which
+hangs it during startup."
+  (cond (noninteractive "batch mode")
+        ((and (daemonp) (equal (terminal-name) "initial_terminal"))
+         "a daemon without a client frame")))
+
 (defun emrs-install--consent (module version platform url)
   "Return non-nil if the user allows downloading MODULE of VERSION from URL.
 PLATFORM is the platform name shown in the question."
   (pcase emrs-install-download
     ('always t)
     ('never nil)
-    (_ (and (not noninteractive)
+    (_ (and (not (emrs-install--no-prompt-reason))
             (y-or-n-p (format "Download the %s module %s for %s from %s? "
                               module version platform url))))))
 
@@ -367,8 +376,10 @@ checksum mismatch."
                  (format "no prebuilt module for %s" system-configuration))
                 ((eq emrs-install-download 'never)
                  "`emrs-install-download' is never")
-                ((and noninteractive (not (eq emrs-install-download 'always)))
-                 "not asked in batch mode (set `emrs-install-download' to always)")
+                ((and (emrs-install--no-prompt-reason)
+                      (not (eq emrs-install-download 'always)))
+                 (format "not asked in %s (set `emrs-install-download' to always)"
+                         (emrs-install--no-prompt-reason)))
                 ((not (emrs-install--consent module version platform url))
                  "download declined"))))
     (if reason
@@ -679,17 +690,21 @@ whose package directory is gone, gives the checkout as PACKAGE-DIR."
 (defun emrs-install--present (module version file)
   "Return FILE, the file found for MODULE of VERSION, or rebuild it.
 If FILE is a local build older than its sources, ask whether to build
-it again (interactive sessions only)."
+it again.  Where nobody can answer, a daemon logs that it is old and
+batch mode says nothing."
   (let ((built-from (and (equal file (emrs-install--installed-file module version))
                          (emrs-install--built-from file))))
     (when (and built-from
                (not noninteractive)
                (not (emrs-install--loaded-p module))
                (emrs-install--checkout module)
-               (emrs-install--stale-p (car built-from) file (cadr built-from))
-               (y-or-n-p (format "The %s module is older than its sources.  Rebuild it now with cargo? "
-                                 module)))
-      (emrs-install--start-build module))
+               (emrs-install--stale-p (car built-from) file (cadr built-from)))
+      (cond ((emrs-install--no-prompt-reason)
+             (message "The %s module is older than its sources; M-x emrs-install-build rebuilds it"
+                      module))
+            ((y-or-n-p (format "The %s module is older than its sources.  Rebuild it now with cargo? "
+                               module))
+             (emrs-install--start-build module))))
     file))
 
 (defun emrs-install--offer-build (module version)
@@ -697,7 +712,8 @@ it again (interactive sessions only)."
 When the user agrees, start the build and signal a `user-error'."
   (cond ((null (emrs-install--checkout module))
          "build: no checkout with Cargo.toml found")
-        (noninteractive "build: not offered in batch mode")
+        ((emrs-install--no-prompt-reason)
+         (format "build: not offered in %s" (emrs-install--no-prompt-reason)))
         ((y-or-n-p (format "Build the %s module %s with cargo? " module version))
          (emrs-install--start-build module))
         (t "build: declined")))
