@@ -116,7 +116,8 @@ A `rust-toolchain.toml` in the module's repository overrides the input
    the user is asked first; the build runs in the buffer
    `*emrs-install <module>*`, and the command that needed the module ends
    with a message to run it again once the build is done. Not offered in
-   batch mode.
+   batch mode, nor in a daemon until a client's frame is selected: nobody
+   could answer there, and the question would hang the daemon's startup.
 
 If none works, the error says what was tried. A loaded module that reports
 another version than the registered one gives a warning.

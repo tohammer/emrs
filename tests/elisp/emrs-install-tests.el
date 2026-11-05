@@ -663,6 +663,52 @@ BINDINGS is (FILE) naming the variable for the installed file."
         (should (equal (emrs-install--present 'm "1.0.0" file) file))
         (should (equal (list asked built) '(2 (m))))))))
 
+;; A daemon starting up has only the initial terminal: `y-or-n-p' reads
+;; from its stdin there and hangs it.
+(defmacro emrs-install-test--with-terminal (name &rest body)
+  "Run BODY as in a daemon whose selected terminal is NAME."
+  (declare (indent 1))
+  `(let ((noninteractive nil))
+     (cl-letf (((symbol-function 'daemonp) (lambda () t))
+               ((symbol-function 'terminal-name) (lambda (&rest _) ,name)))
+       ,@body)))
+
+(ert-deftest emrs-install-test-daemon-without-client-does-not-ask ()
+  (emrs-install-test--with-built (file)
+    (let ((asked 0))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (cl-incf asked) nil))
+                ((symbol-function 'emrs-install--loaded-p) (lambda (_) nil)))
+        (emrs-install-test--with-terminal "initial_terminal"
+          ;; The stale module is used, and the log says what to do.
+          (should (equal (emrs-install--present 'm "1.0.0" file) file))
+          (should (string-match-p
+                   "older than its sources.*emrs-install-build"
+                   (with-current-buffer "*Messages*"
+                     (goto-char (point-max))
+                     (forward-line -1)
+                     (buffer-substring (point) (point-max)))))
+          (should (string-match-p "not offered in a daemon"
+                                  (emrs-install--offer-build 'm "1.0.0")))
+          (should-not (emrs-install--consent 'm "1.0.0" "p" "https://x")))
+        (should (= asked 0))
+        ;; A client's frame can answer.
+        (emrs-install-test--with-terminal "/dev/pts/1"
+          (should (equal (emrs-install--present 'm "1.0.0" file) file))
+          (should (= asked 1)))))))
+
+(ert-deftest emrs-install-test-daemon-without-client-download-reason ()
+  (emrs-install-test--with-env (_dir root)
+    (skip-unless (emrs-install-platform))
+    (emrs-install-register 'emrs-test :version "0.1.0"
+                           :url (emrs-install-test--make-release root "0.1.0"))
+    (cl-letf (((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (error "Asked"))))
+      (emrs-install-test--with-terminal "initial_terminal"
+        (should (string-match-p
+                 "download: not asked in a daemon"
+                 (cdr (emrs-install--download 'emrs-test))))))))
+
 (ert-deftest emrs-install-test-build-finished-hook ()
   (emrs-install-test--with-env (dir _root)
     (emrs-install-register 'm :version "2.0.0")
